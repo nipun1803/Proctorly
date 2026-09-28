@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import electron from 'electron';
-const { screen } = electron;
+const { desktopCapturer, screen } = electron;
 import { exec } from 'child_process';
 
 export const EXAM_STATES = {
@@ -28,6 +28,8 @@ export class ProctoringController {
         this.window = null;
         this.session = null;
         this.currentQuestionId = 1;
+        this.captureIntervalMs = 10000;
+        this.captureTimer = null;
     }
 
     setWindow(win) {
@@ -38,48 +40,65 @@ export class ProctoringController {
         return this.state;
     }
 
-    async getBackgroundApps() {
-        return new Promise((resolve) => {
-            const isWin = process.platform === 'win32';
-            const cmd = isWin ? 'tasklist /FO CSV /NH' : 'ps -eo comm=';
-
-            exec(cmd, { timeout: 3000 }, (err, stdout) => {
-                if (err || !stdout) return resolve([]);
-                const lines = stdout.toLowerCase().split('\n');
-                const detected = new Set();
-
-                for (const target of BLOCKED_APPS) {
-                    for (const line of lines) {
-                        if (line.includes(target)) {
-                            detected.add(target);
-                            break;
-                        }
-                    }
-                }
-                resolve(Array.from(detected));
-            });
-        });
-    }
-
-    checkDisplays() {
-        const displays = screen.getAllDisplays();
-        return {
-            count: displays.length,
-            valid: displays.length === 1
-        };
+    getSessionDir() {
+        if (!this.session || !this.session.sessionId) return null;
+        return path.join(import.meta.dirname, '../backend/data/sessions', this.session.sessionId);
     }
 
     async startSession({ sessionId, studentId, studentName, mode = 'PROCTORED', durationSec = 1800 }) {
-        this.session = { sessionId, studentId, studentName, mode, durationSec, startedAt: new Date().toISOString() };
+        this.session = {
+            sessionId,
+            studentId,
+            studentName,
+            mode,
+            durationSec,
+            files: [],
+            screenshots: [],
+            cameraShots: []
+        };
         this.state = EXAM_STATES.ACTIVE;
+        this.startSurveillance();
         return this.session;
     }
 
-    async stopSession(endState = EXAM_STATES.SUBMITTED, reason = 'Normal completion') {
-        if (this.session) {
-            this.session.status = endState;
-            this.session.submittedAt = new Date().toISOString();
+    startSurveillance() {
+        if (this.captureTimer) clearInterval(this.captureTimer);
+        this.captureTimer = setInterval(() => {
+            if (this.state === EXAM_STATES.ACTIVE) {
+                this.captureDesktopSurveillance();
+                if (this.window) {
+                    this.window.webContents.send('request-face-snapshot', {
+                        timestamp: new Date().toISOString(),
+                        questionId: this.currentQuestionId
+                    });
+                }
+            }
+        }, this.captureIntervalMs);
+    }
+
+    async captureDesktopSurveillance() {
+        try {
+            const sources = await desktopCapturer.getSources({
+                types: ['screen'],
+                thumbnailSize: { width: 1280, height: 720 }
+            });
+            if (sources.length > 0) {
+                const img = sources[0].thumbnail.toJPEG(65);
+                const sessionDir = this.getSessionDir();
+                if (sessionDir) {
+                    const filename = `${Date.now()}.jpg`;
+                    const outPath = path.join(sessionDir, 'screenshots', filename);
+                    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+                    fs.writeFileSync(outPath, img);
+                }
+            }
+        } catch (err) {
+            console.error('Surveillance capture error:', err.message);
         }
+    }
+
+    async stopSession(endState = EXAM_STATES.SUBMITTED, reason = 'Normal completion') {
+        if (this.captureTimer) clearInterval(this.captureTimer);
         this.state = endState;
         return this.session;
     }
