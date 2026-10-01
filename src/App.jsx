@@ -17,6 +17,81 @@ import {
 
 const isElectron = typeof window !== 'undefined' && !!window.athena;
 
+// ─── Universal Cross-Platform / Cross-Browser Fullscreen Helpers ───────────
+async function enterFullscreenUniversal() {
+  if (isElectron && window.athena && window.athena.enterFullscreen) {
+    try {
+      await window.athena.enterFullscreen();
+      return true;
+    } catch (e) {
+      console.warn('Electron enterFullscreen error:', e);
+    }
+  }
+
+  const docEl = document.documentElement;
+  const reqFn =
+    docEl.requestFullscreen ||
+    docEl.webkitRequestFullscreen ||
+    docEl.webkitRequestFullScreen ||
+    docEl.mozRequestFullScreen ||
+    docEl.msRequestFullscreen;
+
+  if (reqFn) {
+    try {
+      const res = reqFn.call(docEl);
+      if (res && typeof res.then === 'function') {
+        await res;
+      }
+      return true;
+    } catch (err) {
+      console.warn('Browser requestFullscreen error:', err);
+    }
+  }
+  return false;
+}
+
+async function exitFullscreenUniversal() {
+  if (isElectron && window.athena && window.athena.exitFullscreen) {
+    try {
+      await window.athena.exitFullscreen();
+      return true;
+    } catch (e) {
+      console.warn('Electron exitFullscreen error:', e);
+    }
+  }
+
+  const exitFn =
+    document.exitFullscreen ||
+    document.webkitExitFullscreen ||
+    document.webkitCancelFullScreen ||
+    document.mozCancelFullScreen ||
+    document.msExitFullscreen;
+
+  if (exitFn) {
+    try {
+      const res = exitFn.call(document);
+      if (res && typeof res.then === 'function') {
+        await res;
+      }
+      return true;
+    } catch (err) {
+      console.warn('Browser exitFullscreen error:', err);
+    }
+  }
+  return false;
+}
+
+function checkIsFullscreenUniversal() {
+  if (typeof document === 'undefined') return false;
+  return !!(
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.webkitCurrentFullScreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement
+  );
+}
+
 export default function App() {
   // ─── Candidate & Session State ───────────────────────────────────────────
   const [studentName, setStudentName] = useState('');
@@ -41,6 +116,7 @@ export default function App() {
   const [blockedKeyAlert, setBlockedKeyAlert] = useState(null);
   const [focusLostAlert, setFocusLostAlert] = useState(false);
   const [fullscreenViolation, setFullscreenViolation] = useState(false);
+  const [isFullscreenActive, setIsFullscreenActive] = useState(false);
 
   // Video and Stream Refs
   const videoRef = useRef(null);
@@ -117,11 +193,24 @@ export default function App() {
 
   // ─── Fullscreen & Focus Loss Listeners (Browser Fallback) ─────────────────
   useEffect(() => {
-    // Only use DOM fullscreenchange in browser mode; Electron uses native window events
+    // Check initial state
+    async function syncFs() {
+      if (isElectron && window.athena && window.athena.isFullscreen) {
+        try {
+          const isFs = await window.athena.isFullscreen();
+          setIsFullscreenActive(!!isFs);
+          return;
+        } catch {}
+      }
+      setIsFullscreenActive(checkIsFullscreenUniversal());
+    }
+    syncFs();
+
     if (isElectron) return;
 
     const handleFullscreenChange = () => {
-      const isCurrentlyFullscreen = !!document.fullscreenElement;
+      const isCurrentlyFullscreen = checkIsFullscreenUniversal();
+      setIsFullscreenActive(isCurrentlyFullscreen);
       if (!isCurrentlyFullscreen && examState === 'ACTIVE') {
         setFullscreenViolation(true);
         setExamLocked(true);
@@ -131,8 +220,11 @@ export default function App() {
       }
     };
 
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    const fsEvents = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
+    fsEvents.forEach(evt => document.addEventListener(evt, handleFullscreenChange));
+    return () => {
+      fsEvents.forEach(evt => document.removeEventListener(evt, handleFullscreenChange));
+    };
   }, [examState]);
 
   // ─── Browser Fallback Timer & Exam State Guard ────────────────────────────
@@ -287,11 +379,13 @@ export default function App() {
     const removeFullscreenExitedListener = window.athena.onFullscreenExited(() => {
       setFullscreenViolation(true);
       setExamLocked(true);
+      setIsFullscreenActive(false);
     });
 
     const removeFullscreenRestoredListener = window.athena.onFullscreenRestored(() => {
       setFullscreenViolation(false);
       setExamLocked(false);
+      setIsFullscreenActive(true);
     });
 
     // 6. Exam Expiration
@@ -339,6 +433,9 @@ export default function App() {
       return;
     }
 
+    // 1. Enter fullscreen in Electron or browser immediately to retain user gesture token
+    const fsPromise = enterFullscreenUniversal();
+
     // Ensure camera is active
     if (!cameraEnabled) {
       const ok = await requestCameraAccess();
@@ -349,14 +446,8 @@ export default function App() {
     }
 
     try {
-      // 1. Enter fullscreen in Electron or browser
-      if (isElectron && window.athena.enterFullscreen) {
-        await window.athena.enterFullscreen();
-      } else if (!isElectron && document.documentElement.requestFullscreen) {
-        try {
-          await document.documentElement.requestFullscreen();
-        } catch {}
-      }
+      await fsPromise;
+      setIsFullscreenActive(true);
 
       // 2. Create session on backend
       const res = await fetch('http://localhost:3000/exam/start', {
@@ -409,9 +500,8 @@ export default function App() {
     setExamLocked(false);
     setTimerDisplay('30:00');
     setFullscreenViolation(false);
-    if (isElectron && window.athena.exitFullscreen) {
-      window.athena.exitFullscreen();
-    }
+    exitFullscreenUniversal();
+    setIsFullscreenActive(false);
   }
 
   // ─── Re-check Background Apps ─────────────────────────────────────────────
@@ -429,16 +519,10 @@ export default function App() {
   }
 
   async function handleRestoreFullscreen() {
-    if (isElectron && window.athena.enterFullscreen) {
-      await window.athena.enterFullscreen();
-    }
-    try {
-      if (document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen().catch(() => {});
-      }
-    } catch {}
+    await enterFullscreenUniversal();
     setFullscreenViolation(false);
     setExamLocked(false);
+    setIsFullscreenActive(true);
   }
 
   const isReadyToStart = studentName.trim().length > 0 && studentId.trim().length > 0;
@@ -616,6 +700,7 @@ export default function App() {
           timer={timerDisplay}
           restoredAnswers={{}}
           examLocked={examLocked}
+          onRestoreFullscreen={handleRestoreFullscreen}
           onFinish={(results) => {
             setExamResults(results);
             setExamState('SUBMITTED');
@@ -795,9 +880,37 @@ export default function App() {
                 <CheckCircle className="w-4 h-4" style={{ color: '#059669' }} />
                 <span style={{ color: '#059669', fontWeight: 500 }}>Screen recording</span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
-                <CheckCircle className="w-4 h-4" style={{ color: '#059669' }} />
-                <span style={{ color: '#059669', fontWeight: 500 }}>Fullscreen ready</span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '13px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <CheckCircle className="w-4 h-4" style={{ color: isFullscreenActive ? '#059669' : '#0284c7' }} />
+                  <span style={{ color: isFullscreenActive ? '#059669' : '#0f172a', fontWeight: 500 }}>
+                    {isFullscreenActive ? 'Fullscreen Active' : 'Fullscreen Ready'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (isFullscreenActive) {
+                      await exitFullscreenUniversal();
+                      setIsFullscreenActive(false);
+                    } else {
+                      await enterFullscreenUniversal();
+                      setIsFullscreenActive(true);
+                    }
+                  }}
+                  style={{
+                    padding: '3px 10px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    borderRadius: '6px',
+                    border: '1px solid #cbd5e1',
+                    background: '#f8fafc',
+                    color: '#334155',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {isFullscreenActive ? 'Exit' : 'Test / Enter'}
+                </button>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
                 <CheckCircle className="w-4 h-4" style={{ color: '#059669' }} />

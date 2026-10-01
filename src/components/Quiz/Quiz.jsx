@@ -12,7 +12,7 @@ export const QUESTION_STATES = {
   CURRENT: 'CURRENT',
 };
 
-export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, onFinish }) {
+export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, onFinish, onRestoreFullscreen }) {
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState(restoredAnswers || {});
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -239,6 +239,26 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
             <h3>Exam Locked</h3>
             <p>Security violation detected (fullscreen exit or application switch). Answering is temporarily restricted.</p>
             <p>This incident has been recorded with desktop evidence.</p>
+            {onRestoreFullscreen && (
+              <button
+                type="button"
+                onClick={onRestoreFullscreen}
+                style={{
+                  marginTop: '20px',
+                  background: '#dc2626',
+                  color: '#ffffff',
+                  border: 'none',
+                  padding: '10px 24px',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 12px rgba(220, 38, 38, 0.3)'
+                }}
+              >
+                Re-enter Fullscreen & Unlock Exam
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -357,13 +377,6 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
             </div>
 
             <div className="quiz-bottom-actions">
-              <button
-                className={`btn-bottom-mark-review ${isCurrentMarked ? 'active' : ''}`}
-                onClick={() => toggleMarkForReview(currentQuestion.id)}
-                disabled={examLocked}
-              >
-                {isCurrentMarked ? '★ Marked for Review' : '☆ Mark for Review'}
-              </button>
               <button
                 className="btn-bottom-clear"
                 onClick={() => handleClearSelection(currentQuestion.id)}
