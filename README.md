@@ -9,30 +9,31 @@ Proctorly provides a secure, monitored testing environment for candidates and ed
 ## 🚀 Key Features
 
 - **Automated Anti-Cheat Surveillance**:
-  - Fullscreen lock and kiosk enforcement.
-  - Multi-display and external monitor detection.
-  - Window blur and application-switching alerts.
+  - **Native Kiosk Mode & OS Lockdown**: Enforces native kiosk presentation options (`NSApplicationPresentationDisableProcessSwitching`) on macOS to disable Mission Control gestures, Spaces swipe, the Dock, and the Menu Bar.
+  - **Screen-Saver Level Priority**: Elevates the examination window to `NSScreenSaverWindowLevel` (`win.setAlwaysOnTop(true, 'screen-saver', 1)`) so no background apps or floating notifications can display over the exam.
+  - **Multi-Display & External Monitor Detection**: Disallows multiple monitors or side-car displays.
+  - **Window Focus / Blur Monitoring**: Tracks window blur events and immediately captures desktop evidence if focus is lost.
 - **Prohibited Background Process Detection**:
-  - Detects background processes such as Zoom, Discord, OBS, TeamViewer, AnyDesk, Slack, Skype, etc.
-- **Surveillance Snapshots**:
+  - Detects unauthorized background processes such as Zoom, Discord, OBS, TeamViewer, AnyDesk, Slack, Skype, etc.
+- **Synchronized Surveillance Snapshots**:
   - Periodic desktop screenshots using Electron's `desktopCapturer`.
   - Periodic candidate webcam snapshots synchronized by session timestamp.
-- **Keystroke & Shortcut Guard**:
-  - Low-level blocking and logging of forbidden key combinations (Copy, Paste, Print, Inspect, Alt+Tab, Cmd+Tab, Spotlight, Mission Control).
-- **Session Lifecycle & Auto-Submission**:
-  - Synchronized countdown timer managed by main process.
-  - Automatic submission and session closure on timer expiration or abort.
-- **Interactive Examination HUD**:
-  - Real-time webcam preview.
-  - Live proctoring status indicators.
+- **Precision Keystroke & Shortcut Guard**:
+  - Low-level blocking and logging of forbidden key combinations (Copy, Paste, Print, Inspect, Alt+Tab, Cmd+Tab, Spotlight, Mission Control) with strict modifier matching to prevent false positives during normal typing.
+- **Session Lifecycle & Authoritative Clock**:
+  - Authoritative countdown timer managed by the main process with automatic submission on expiration.
+  - Fault-tolerant stream protection suppressing broken-pipe errors (`EIO`/`EPIPE`) and safe IPC message dispatching.
+- **Interactive Examination HUD & Recovery UI**:
+  - Real-time webcam preview with status badges.
+  - Self-healing "Re-enter Fullscreen & Unlock Exam" action to recover from accidental focus loss.
   - Interactive MCQ navigation and instant score evaluation.
 
 ---
 
 ## 🛠️ Technology Stack
 
-- **Frontend**: React 18, Vite, Tailwind CSS, Lucide React, Radix UI.
-- **Desktop Wrapper**: Electron with secure IPC (`contextIsolation`, preload `contextBridge`).
+- **Frontend**: React 19, Vite, Tailwind CSS, Lucide React.
+- **Desktop Wrapper**: Electron with secure IPC (`contextIsolation`, preload `contextBridge`), native Kiosk APIs, and `desktopCapturer`.
 - **Backend**: Express.js server managing question evaluation, session telemetry, and media uploads.
 
 ---
@@ -61,6 +62,12 @@ npm run dev
 
 ---
 
+## 📚 System Architecture & Interview Guide
+
+For a comprehensive breakdown of the system design, exact function locations, High-Level Design (HLD) diagrams, and interview talking points, refer to the [System Documentation](docs/SYSTEM_DOCUMENTATION.md).
+
+---
+
 ## 📁 Repository Structure
 
 ```text
@@ -74,6 +81,8 @@ Proctorly/
 │   │   └── questions.json       # Assessment question dataset
 │   ├── server.js                # Express REST API for session management
 │   └── README.md
+├── docs/
+│   └── SYSTEM_DOCUMENTATION.md  # Comprehensive HLD, function matrix, & interview guide
 ├── src/
 │   ├── components/              # Quiz and UI components
 │   ├── App.jsx                  # Main candidate examination dashboard
