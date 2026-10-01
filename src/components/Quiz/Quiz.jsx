@@ -314,26 +314,6 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
             })}
           </div>
         </div>
-
-        {/* Legend directly beneath question card */}
-        <div className="quiz-bottom-legend">
-          <div className="legend-item">
-            <span className="legend-dot attempted"></span>
-            <span>Attempted</span>
-          </div>
-          <div className="legend-item">
-            <span className="legend-dot viewed"></span>
-            <span>Viewed</span>
-          </div>
-          <div className="legend-item">
-            <span className="legend-dot current"></span>
-            <span>Current</span>
-          </div>
-          <div className="legend-item">
-            <span className="legend-dot-review"></span>
-            <span>Marked for Review</span>
-          </div>
-        </div>
       </div>
 
       {/* ─── Bottom Navigation Bar (Directly Anchored at Bottom of Screen) ─── */}
@@ -350,8 +330,28 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
             </button>
           </div>
 
-          {/* Center: Question Numbers & Mark for Review */}
+          {/* Center: Status Legend & Question Numbers */}
           <div className="quiz-bottom-center">
+            {/* Status Legend directly above question numbers */}
+            <div className="quiz-bottom-legend">
+              <div className="legend-item">
+                <span className="legend-dot attempted"></span>
+                <span>Attempted</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot viewed"></span>
+                <span>Viewed</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot current"></span>
+                <span>Current</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot-review"></span>
+                <span>Marked for Review</span>
+              </div>
+            </div>
+
             <div className="quiz-bottom-question-numbers">
               {questions.map((q, idx) => {
                 const status = getQuestionStatus(idx);
@@ -374,16 +374,6 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
                   </div>
                 );
               })}
-            </div>
-
-            <div className="quiz-bottom-actions">
-              <button
-                className="btn-bottom-clear"
-                onClick={() => handleClearSelection(currentQuestion.id)}
-                disabled={selectedOptIndex === undefined || examLocked}
-              >
-                Clear Selection
-              </button>
             </div>
           </div>
 

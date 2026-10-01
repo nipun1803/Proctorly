@@ -89,7 +89,7 @@ function createWindow() {
         fullscreen: false,
         fullscreenable: true,
         kiosk: false,
-        frame: true,
+        frame: false,
         autoHideMenuBar: true,
         webPreferences: {
             webSecurity: true,
@@ -99,6 +99,14 @@ function createWindow() {
             preload: path.join(import.meta.dirname, 'preload.js')
         }
     });
+
+    if (process.platform === 'darwin' && typeof electronWindow.setWindowButtonVisibility === 'function') {
+        try {
+            electronWindow.setWindowButtonVisibility(false);
+        } catch {
+            // Frameless windows have no window buttons
+        }
+    }
 
     proctoringController.setWindow(electronWindow);
 
