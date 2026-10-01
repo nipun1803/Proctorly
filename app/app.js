@@ -1,3 +1,45 @@
+// ─── Stream & Error Protection (Prevents write EIO / EPIPE crashes) ─────────
+for (const stream of [process.stdout, process.stderr]) {
+    if (stream && typeof stream.on === 'function') {
+        stream.on('error', (err) => {
+            if (err && (err.code === 'EPIPE' || err.code === 'EIO' || err.message?.includes('write EIO') || err.message?.includes('write EPIPE'))) {
+                return; // Suppress broken pipe / closed terminal writes
+            }
+        });
+    }
+}
+
+// Protect console methods from throwing synchronously on dead stdio
+for (const method of ['log', 'warn', 'error', 'info', 'debug']) {
+    const orig = console[method];
+    if (typeof orig === 'function') {
+        console[method] = (...args) => {
+            try {
+                orig(...args);
+            } catch (err) {
+                if (err && (err.code === 'EPIPE' || err.code === 'EIO' || err.message?.includes('write EIO') || err.message?.includes('write EPIPE'))) {
+                    return;
+                }
+            }
+        };
+    }
+}
+
+// Global uncaught exception filter to prevent Electron modal popups on stream write errors
+process.on('uncaughtException', (err) => {
+    if (err && (err.code === 'EPIPE' || err.code === 'EIO' || err.message?.includes('write EIO') || err.message?.includes('write EPIPE'))) {
+        return; // Ignore broken stream write errors
+    }
+    console.error('Uncaught Exception in Main Process:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+    if (reason && (reason.code === 'EPIPE' || reason.code === 'EIO' || reason.message?.includes('write EIO') || reason.message?.includes('fetch failed'))) {
+        return;
+    }
+    console.error('Unhandled Rejection in Main Process:', reason);
+});
+
 import electron from "electron";
 const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, session, screen, Menu, clipboard } = electron;
 import path from "path";
@@ -8,6 +50,7 @@ import { ProctoringController, EXAM_STATES } from "./proctoringController.js";
 let electronWindow = null;
 let forceQuit = false;
 let backendProcess = null;
+let clipboardInterval = null;
 const proctoringController = new ProctoringController();
 
 // ─── Quit Handler ─────────────────────────────────────────────────────────────
@@ -44,6 +87,7 @@ function createWindow() {
         minWidth: 900,
         minHeight: 700,
         fullscreen: false,
+        fullscreenable: true,
         kiosk: false,
         frame: true,
         autoHideMenuBar: true,
@@ -126,8 +170,29 @@ function createWindow() {
         }
     });
 
+    // ─── Renderer Crash / Disconnect Watchdog ───
+    electronWindow.webContents.on('render-process-gone', (_event, details) => {
+        console.warn('Renderer process gone:', details?.reason);
+        proctoringController.stopClockTimer();
+        proctoringController.stopCaptureScheduler();
+        proctoringController.stopKioskEnforcement();
+    });
+
+    electronWindow.on('closed', () => {
+        if (clipboardInterval) {
+            clearInterval(clipboardInterval);
+            clipboardInterval = null;
+        }
+        proctoringController.stopClockTimer();
+        proctoringController.stopCaptureScheduler();
+        proctoringController.stopKioskEnforcement();
+        proctoringController.setWindow(null);
+        electronWindow = null;
+    });
+
     // ─── Clear clipboard during active exam ───
-    setInterval(() => {
+    if (clipboardInterval) clearInterval(clipboardInterval);
+    clipboardInterval = setInterval(() => {
         if (proctoringController.getState() === EXAM_STATES.ACTIVE) {
             try {
                 clipboard.clear();
@@ -148,18 +213,33 @@ ipcMain.handle('start-exam-session', async (_event, params) => {
 // Fullscreen Control
 ipcMain.handle('enter-fullscreen', () => {
     if (electronWindow && !electronWindow.isDestroyed()) {
-        electronWindow.setFullScreenable(true);
-        electronWindow.setFullScreen(true);
-        electronWindow.focus();
-        return true;
+        try {
+            proctoringController.enterExamFullscreen();
+            return true;
+        } catch (err) {
+            console.error('Failed to enter fullscreen:', err);
+            return false;
+        }
     }
     return false;
 });
 
 ipcMain.handle('exit-fullscreen', () => {
     if (electronWindow && !electronWindow.isDestroyed()) {
-        electronWindow.setFullScreen(false);
-        return true;
+        try {
+            proctoringController.exitExamFullscreen();
+            return true;
+        } catch (err) {
+            console.error('Failed to exit fullscreen:', err);
+            return false;
+        }
+    }
+    return false;
+});
+
+ipcMain.handle('is-fullscreen', () => {
+    if (electronWindow && !electronWindow.isDestroyed()) {
+        return electronWindow.isFullScreen() || electronWindow.isKiosk();
     }
     return false;
 });
@@ -233,9 +313,23 @@ app.whenReady().then(() => {
     const sessionsPath = path.join(import.meta.dirname, '../backend/data/sessions.json');
     
     // Only fork backend if not already running on port 3000
-    backendProcess = fork(serverPath, [], {
-        env: { ...process.env, SESSIONS_PATH: sessionsPath }
-    });
+    fetch('http://localhost:3000/exam/mcq')
+        .then(() => {
+            console.log('Backend server already running on http://localhost:3000');
+        })
+        .catch(() => {
+            try {
+                backendProcess = fork(serverPath, [], {
+                    env: { ...process.env, SESSIONS_PATH: sessionsPath },
+                    stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+                });
+                backendProcess.on('error', (err) => {
+                    console.warn('Backend process error:', err.message);
+                });
+            } catch (err) {
+                console.warn('Failed to fork backend server:', err.message);
+            }
+        });
 
     app.on('will-quit', () => {
         proctoringController.flushKeylogs();

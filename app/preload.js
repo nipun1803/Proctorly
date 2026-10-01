@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld("athena", {
     exitFullscreen: () => {
         return ipcRenderer.invoke('exit-fullscreen');
     },
+    isFullscreen: () => {
+        return ipcRenderer.invoke('is-fullscreen');
+    },
 
     // ─── Evidence Storage (Synchronized Timestamps) ──────────────────────────
     storeFaceSnapshot: (data, timestamp) => {

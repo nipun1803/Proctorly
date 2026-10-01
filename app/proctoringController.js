@@ -1,3 +1,14 @@
+// ─── Stream & Error Protection ─────────
+for (const stream of [process.stdout, process.stderr]) {
+    if (stream && typeof stream.on === 'function') {
+        stream.on('error', (err) => {
+            if (err && (err.code === 'EPIPE' || err.code === 'EIO' || err.message?.includes('write EIO') || err.message?.includes('write EPIPE'))) {
+                return;
+            }
+        });
+    }
+}
+
 import fs from 'fs';
 import path from 'path';
 import electron from 'electron';
@@ -76,13 +87,87 @@ export class ProctoringController {
         this.captureIntervalMs = 10000; // Synchronized capture every 10s
         this.captureTimer = null;
         this.clockTimer = null;
+        this.kioskEnforceTimer = null;
         this.keylogBuffer = [];
         this.keylogFlushTimer = null;
         this.backendUrl = 'http://localhost:3000';
+        this.isTransitioningFullscreen = false;
+        this.lastFocusLostTime = 0;
     }
 
     setWindow(win) {
         this.window = win;
+    }
+
+    enterExamFullscreen() {
+        if (!this.window || this.window.isDestroyed()) return;
+        if (this.window.isKiosk() && this.window.isFullScreen()) return;
+        if (this.isTransitioningFullscreen) return;
+
+        this.isTransitioningFullscreen = true;
+        try {
+            this.window.setFullScreenable(true);
+            this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+            this.window.setKiosk(true);
+            this.window.focus();
+        } catch (err) {
+            console.warn('Failed to enter kiosk mode:', err);
+            try {
+                this.window.setFullScreen(true);
+                this.window.focus();
+            } catch (fsErr) {
+                console.warn('Fallback setFullScreen error:', fsErr);
+            }
+        } finally {
+            setTimeout(() => {
+                this.isTransitioningFullscreen = false;
+            }, 1200);
+        }
+    }
+
+    exitExamFullscreen() {
+        if (!this.window || this.window.isDestroyed()) return;
+        if (!this.window.isKiosk() && !this.window.isFullScreen()) return;
+        if (this.isTransitioningFullscreen) return;
+
+        this.isTransitioningFullscreen = true;
+        try {
+            if (this.window.isKiosk()) {
+                this.window.setKiosk(false);
+            }
+            this.window.setAlwaysOnTop(false);
+            if (this.window.isFullScreen()) {
+                this.window.setFullScreen(false);
+            }
+        } catch (err) {
+            console.warn('Failed to exit kiosk mode:', err);
+        } finally {
+            setTimeout(() => {
+                this.isTransitioningFullscreen = false;
+            }, 1200);
+        }
+    }
+
+    safeSend(channel, payload) {
+        if (!this.window || this.window.isDestroyed()) {
+            return false;
+        }
+        try {
+            const wc = this.window.webContents;
+            if (!wc || wc.isDestroyed()) {
+                return false;
+            }
+            if (typeof wc.isCrashed === 'function' && wc.isCrashed()) {
+                return false;
+            }
+            if (!wc.mainFrame) {
+                return false;
+            }
+            wc.send(channel, payload);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     getState() {
@@ -164,19 +249,13 @@ export class ProctoringController {
         // Log session start event
         this.logEvent('EXAM_STARTED', this.currentQuestionId, { mode, durationSec });
 
-        // Configure window for exam mode (macOS space-locked kiosk)
+        // Configure window for exam mode
         if (this.window && !this.window.isDestroyed()) {
             if (mode === 'PROCTORED') {
-                this.window.setFullScreenable(true);
-                this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
-                this.window.setAlwaysOnTop(true, 'screen-saver', 1);
-                this.window.setKiosk(true);
-                this.window.setFullScreen(true);
+                this.enterExamFullscreen();
             }
-            app.focus({ steal: true });
             this.window.show();
             this.window.focus();
-            this.window.moveTop();
         }
 
         // Register global shortcuts to block OS-level switching and screenshot shortcuts
@@ -210,17 +289,8 @@ export class ProctoringController {
         this.stopKioskEnforcement();
         this.unregisterGlobalShortcuts();
 
-        // 2. Release window locks
-        if (this.window && !this.window.isDestroyed()) {
-            try {
-                this.window.setVisibleOnAllWorkspaces(false);
-                this.window.setAlwaysOnTop(false);
-                this.window.setKiosk(false);
-                this.window.setFullScreen(false);
-            } catch {
-                // Ignore
-            }
-        }
+        // 2. Release window fullscreen
+        this.exitExamFullscreen();
 
         // 3. Flush pending keylogs and write final event
         this.flushKeylogs();
@@ -237,12 +307,10 @@ export class ProctoringController {
         this.state = endState;
 
         // Notify renderer of state change
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('exam-state-changed', {
-                state: this.state,
-                sessionId: this.session?.sessionId
-            });
-        }
+        this.safeSend('exam-state-changed', {
+            state: this.state,
+            sessionId: this.session?.sessionId
+        });
     }
 
     // ─── Synchronized Evidence Capture ────────────────────────────────────────
@@ -257,9 +325,11 @@ export class ProctoringController {
 
         // Periodic synchronized capture
         this.captureTimer = setInterval(() => {
-            if (this.state === EXAM_STATES.ACTIVE) {
-                this.triggerSynchronizedCapture();
+            if (this.state !== EXAM_STATES.ACTIVE || !this.window || this.window.isDestroyed()) {
+                this.stopCaptureScheduler();
+                return;
             }
+            this.triggerSynchronizedCapture();
         }, this.captureIntervalMs);
     }
 
@@ -284,9 +354,7 @@ export class ProctoringController {
         }
 
         // 2. Request Face Frame from Renderer with the EXACT same timestamp
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('request-face-snapshot', { timestamp });
-        }
+        this.safeSend('request-face-snapshot', { timestamp });
     }
 
     async captureDesktop(timestamp) {
@@ -422,15 +490,13 @@ export class ProctoringController {
         const totalSec = this.session?.durationSec || 1800;
 
         // Emit initial tick immediately (at t=0) so renderer is updated right away
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('timer-tick', {
-                elapsed: 0,
-                remaining: totalSec
-            });
-        }
+        this.safeSend('timer-tick', {
+            elapsed: 0,
+            remaining: totalSec
+        });
 
         this.clockTimer = setInterval(() => {
-            if (this.state !== EXAM_STATES.ACTIVE) {
+            if (this.state !== EXAM_STATES.ACTIVE || !this.window || this.window.isDestroyed()) {
                 this.stopClockTimer();
                 return;
             }
@@ -438,12 +504,10 @@ export class ProctoringController {
             const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
             const remainingSec = Math.max(0, totalSec - elapsedSec);
 
-            if (this.window && !this.window.isDestroyed()) {
-                this.window.webContents.send('timer-tick', {
-                    elapsed: elapsedSec,
-                    remaining: remainingSec
-                });
-            }
+            this.safeSend('timer-tick', {
+                elapsed: elapsedSec,
+                remaining: remainingSec
+            });
 
             // Expiration condition
             if (remainingSec <= 0) {
@@ -464,9 +528,7 @@ export class ProctoringController {
         console.log('Exam duration expired for session:', this.session?.sessionId);
 
         // Lock answering and notify renderer
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('exam-expired');
-        }
+        this.safeSend('exam-expired');
 
         // Call backend expire endpoint
         try {
@@ -487,12 +549,8 @@ export class ProctoringController {
         this.unregisterGlobalShortcuts();
         const shortcuts = [
             'CommandOrControl+Space',
-            'Alt+Tab',
             'CommandOrControl+H',
             'CommandOrControl+M',
-            'CommandOrControl+Shift+3',
-            'CommandOrControl+Shift+4',
-            'CommandOrControl+Shift+5',
             'CommandOrControl+Alt+Escape',
             'F11',
             'F12'
@@ -514,12 +572,10 @@ export class ProctoringController {
                     this.flagBackend('SHORTCUT_BLOCKED', `Blocked global shortcut: ${shortcut}`, this.currentQuestionId);
                     this.flushKeylogs();
 
-                    if (this.window && !this.window.isDestroyed()) {
-                        this.window.webContents.send('blocked-keybinding', {
-                            key: shortcut,
-                            timestamp: new Date().toISOString()
-                        });
-                    }
+                    this.safeSend('blocked-keybinding', {
+                        key: shortcut,
+                        timestamp: new Date().toISOString()
+                    });
                 });
             } catch (err) {
                 // Ignore registration errors on OS-protected shortcuts
@@ -538,20 +594,16 @@ export class ProctoringController {
     startKioskEnforcement() {
         this.stopKioskEnforcement();
         this.kioskEnforceTimer = setInterval(() => {
-            if (this.state === EXAM_STATES.ACTIVE && this.window && !this.window.isDestroyed()) {
-                if (!this.window.isFocused()) {
-                    app.focus({ steal: true });
-                    this.window.moveTop();
-                    this.window.focus();
-                }
-                if (!this.window.isKiosk()) {
-                    this.window.setKiosk(true);
-                }
-                if (!this.window.isFullScreen()) {
-                    this.window.setFullScreen(true);
-                }
+            if (this.state !== EXAM_STATES.ACTIVE || !this.window || this.window.isDestroyed()) {
+                this.stopKioskEnforcement();
+                return;
             }
-        }, 400);
+
+            // Only check when not actively in a transition
+            if (!this.isTransitioningFullscreen && !this.window.isKiosk() && !this.window.isFullScreen()) {
+                this.handleFullscreenExited();
+            }
+        }, 1500);
     }
 
     stopKioskEnforcement() {
@@ -567,7 +619,7 @@ export class ProctoringController {
 
         // Debounce to prevent rapid oscillation loops on macOS
         const now = Date.now();
-        if (this.lastFocusLostTime && (now - this.lastFocusLostTime) < 2000) {
+        if (this.lastFocusLostTime && (now - this.lastFocusLostTime) < 3000) {
             return;
         }
         this.lastFocusLostTime = now;
@@ -584,39 +636,31 @@ export class ProctoringController {
         this.flushKeylogs();
 
         // Notify renderer
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('window-focus-lost');
+        this.safeSend('window-focus-lost');
 
-            // Reclaim focus immediately in PROCTORED mode
-            if (this.session?.mode === 'PROCTORED') {
-                setTimeout(() => {
-                    if (this.window && !this.window.isDestroyed() && this.state === EXAM_STATES.ACTIVE) {
-                        app.focus({ steal: true });
-                        this.window.show();
-                        this.window.setAlwaysOnTop(true, 'screen-saver', 1);
-                        this.window.setKiosk(true);
-                        this.window.setFullScreen(true);
-                        this.window.moveTop();
-                        this.window.focus();
-                    }
-                }, 100);
-            }
+        // Gently reclaim focus in PROCTORED mode without aggressive stealing
+        if (this.session?.mode === 'PROCTORED') {
+            setTimeout(() => {
+                if (this.window && !this.window.isDestroyed() && this.state === EXAM_STATES.ACTIVE) {
+                    this.window.focus();
+                }
+            }, 300);
         }
     }
 
     handleFocusRestored() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
         this.logEvent('WINDOW_FOCUS_RESTORED', this.currentQuestionId);
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('window-focus-restored');
-        }
+        this.safeSend('window-focus-restored');
     }
 
     async handleFullscreenExited() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
-        if (this.window && !this.window.isDestroyed() && this.window.isFullScreen()) {
+        if (this.isTransitioningFullscreen) return;
+        if (this.window && !this.window.isDestroyed() && (this.window.isFullScreen() || this.window.isKiosk())) {
             return;
         }
+
         console.warn('Fullscreen mode exited during active exam');
 
         this.logEvent('FULLSCREEN_EXITED', this.currentQuestionId);
@@ -626,29 +670,15 @@ export class ProctoringController {
         await this.captureImmediate('FULLSCREEN_EXITED');
         this.flushKeylogs();
 
-        // Lock exam answering in renderer and re-enforce kiosk
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('fullscreen-exited');
-            if (this.session?.mode === 'PROCTORED') {
-                setTimeout(() => {
-                    if (this.window && !this.window.isDestroyed() && this.state === EXAM_STATES.ACTIVE) {
-                        app.focus({ steal: true });
-                        this.window.setKiosk(true);
-                        this.window.setFullScreen(true);
-                        this.window.moveTop();
-                        this.window.focus();
-                    }
-                }, 200);
-            }
-        }
+        // Lock exam answering in renderer
+        this.safeSend('fullscreen-exited');
     }
 
     handleFullscreenRestored() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
+        this.isTransitioningFullscreen = false;
         this.logEvent('FULLSCREEN_RESTORED', this.currentQuestionId);
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('fullscreen-restored');
-        }
+        this.safeSend('fullscreen-restored');
     }
 
     // ─── Input and Key Event Handling ─────────────────────────────────────────
@@ -673,35 +703,39 @@ export class ProctoringController {
             this.flagBackend('SHORTCUT_BLOCKED', `Blocked shortcut: ${input.key}`, this.currentQuestionId);
             this.flushKeylogs();
 
-            if (this.window && !this.window.isDestroyed()) {
-                this.window.webContents.send('blocked-keybinding', {
-                    key: input.key,
-                    ctrl: input.control,
-                    meta: input.meta,
-                    alt: input.alt,
-                    shift: input.shift,
-                    timestamp: new Date().toISOString()
-                });
-            }
+            this.safeSend('blocked-keybinding', {
+                key: input.key,
+                ctrl: input.control,
+                meta: input.meta,
+                alt: input.alt,
+                shift: input.shift,
+                timestamp: new Date().toISOString()
+            });
         }
     }
 
     isBlockedInput(input) {
-        const keyLower = input.key ? input.key.toLowerCase() : '';
+        if (!input || !input.key) return false;
+        const keyLower = input.key.toLowerCase();
         return BLOCKED_KEYS.some(combo => {
-            const keyMatch = combo.key && combo.key.toLowerCase() === keyLower;
-            const ctrlMatch = combo.ctrl ? input.control : true;
-            const metaMatch = combo.meta ? input.meta : true;
-            const altMatch = combo.alt ? input.alt : true;
-            const shiftMatch = combo.shift ? input.shift : true;
+            if (!combo.key || combo.key.toLowerCase() !== keyLower) return false;
 
-            // If a modifier is required, ensure it is pressed
-            if (combo.ctrl && !input.control) return false;
-            if (combo.meta && !input.meta) return false;
-            if (combo.alt && !input.alt) return false;
-            if (combo.shift && !input.shift) return false;
+            const reqCtrl = !!combo.ctrl;
+            const reqMeta = !!combo.meta;
+            const reqAlt = !!combo.alt;
+            const reqShift = !!combo.shift;
 
-            return keyMatch && ctrlMatch && metaMatch && altMatch && shiftMatch;
+            const hasCtrl = !!input.control;
+            const hasMeta = !!input.meta;
+            const hasAlt = !!input.alt;
+            const hasShift = !!input.shift;
+
+            return (
+                reqCtrl === hasCtrl &&
+                reqMeta === hasMeta &&
+                reqAlt === hasAlt &&
+                reqShift === hasShift
+            );
         });
     }
 
