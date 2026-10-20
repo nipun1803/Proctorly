@@ -62,9 +62,9 @@ npm run dev
 
 ---
 
-## 📚 System Architecture & Interview Guide
+## 📚 System Architecture Guide
 
-For a comprehensive breakdown of the system design, exact function locations, High-Level Design (HLD) diagrams, and interview talking points, refer to the [System Documentation](docs/SYSTEM_DOCUMENTATION.md).
+For a comprehensive breakdown of the system design, exact function locations, and High-Level Design (HLD) diagrams, refer to the [System Documentation](docs/SYSTEM_DOCUMENTATION.md).
 
 ---
 
@@ -82,7 +82,7 @@ Proctorly/
 │   ├── server.js                # Express REST API for session management
 │   └── README.md
 ├── docs/
-│   └── SYSTEM_DOCUMENTATION.md  # Comprehensive HLD, function matrix, & interview guide
+│   └── SYSTEM_DOCUMENTATION.md  # Comprehensive HLD and function matrix
 ├── src/
 │   ├── components/              # Quiz and UI components
 │   ├── App.jsx                  # Main candidate examination dashboard

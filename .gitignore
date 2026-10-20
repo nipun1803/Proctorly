@@ -51,3 +51,8 @@ ehthumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Local interview notes & talking points
+docs/INTERVIEW_TALKING_POINTS.md
+*INTERVIEW*
+*interview*

@@ -1,7 +1,7 @@
-# Proctorly 🛡️ — System Architecture & Interview Master Guide
+# Proctorly 🛡️ — System Architecture & Technical Reference Guide
 
-> **Comprehensive Technical Reference, High-Level Design (HLD), and Interview Playbook**  
-> An end-to-end breakdown of how each anti-cheat proctoring feature is built, which functions implement them, exact file locations, and architectural reasoning for technical interviews.
+> **Comprehensive Technical Reference and High-Level Design (HLD)**  
+> An end-to-end breakdown of how each anti-cheat proctoring feature is built, which functions implement them, exact file locations, and architectural design decisions.
 
 ---
 
@@ -23,7 +23,6 @@
    - [Feature 8: Secure Context Bridge & Process Isolation (IPC)](#feature-8-secure-context-bridge--process-isolation-ipc)
    - [Feature 9: Fault-Tolerant Atomic File Storage & Crash Recovery](#feature-9-fault-tolerant-atomic-file-storage--crash-recovery)
    - [Feature 10: Dynamic Student Examination HUD & Violation Banner](#feature-10-dynamic-student-examination-hud--violation-banner)
-4. [Interview Playbook: Top 10 Technical Questions & Model Answers](#4-interview-playbook-top-10-technical-questions--model-answers)
 
 ---
 
@@ -203,9 +202,6 @@ static getRunningProcesses() {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"To prevent candidate cheating via unauthorized remote desktop or collaboration software, we implemented an asynchronous process auditor (`getRunningProcesses`) using Node's `child_process.exec`. We cross-reference native process names against an array of blacklisted process signatures (such as Discord, TeamViewer, and OBS). In `App.jsx`, this executes during the pre-check phase; if any blacklisted app is active, the candidate is blocked from beginning until the application is closed."*
-
 ---
 
 ### Feature 2: Fullscreen Kiosk Mode & Multi-Display Guard
@@ -250,9 +246,6 @@ enterExamFullscreen() {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"To prevent candidate cheating via Spaces switching or Mission Control on macOS, we enforce Electron's native `win.setKiosk(true)` combined with `win.setAlwaysOnTop(true, 'screen-saver', 1)`. Under the hood, this sets macOS `NSApplicationPresentationDisableProcessSwitching`, which locks out trackpad gestures, hides the Dock, and keeps the exam window above all floating applications. Furthermore, we wrap window state changes in an atomic transition mutex lock (`isTransitioningFullscreen`) to prevent AppKit assertion failures during rapid window level changes."*
-
 ---
 
 ### Feature 3: Window Focus / Blur Tracking & Clipboard Eraser
@@ -293,9 +286,6 @@ async handleFocusLost() {
     }
 }
 ```
-
-#### 🎤 Interview Talking Points
-> *"Whenever the application loses OS focus, Electron's `blur` event triggers `handleFocusLost()`. We immediately call `clipboard.clear()` to prevent any copied text from leaving the sandbox, log a `WINDOW_FOCUS_LOST` anomaly with the exact question ID the student was on, capture a desktop snapshot of the candidate's active screen, and push a high-priority warning banner to the frontend."*
 
 ---
 
@@ -343,9 +333,6 @@ isBlockedInput(input) {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"Standard DOM `keydown` handlers can be bypassed or fail to prevent native OS shortcuts like Developer Tools (F12) or browser reloads (Ctrl+R). In Proctorly, we hook into Electron's `before-input-event` on `webContents` to intercept raw input at the native Chromium level prior to DOM dispatch. Crucially, we enforce exact boolean modifier equality: rather than checking if modifiers are merely truthy, we verify that the exact pressed set of Ctrl/Meta/Alt/Shift matches the definition, eliminating false positives during normal exam typing."*
-
 ---
 
 ### Feature 5: High-Frequency Keystroke Telemetry & Buffer Flushing
@@ -382,9 +369,6 @@ flushKeylogs() {
     });
 }
 ```
-
-#### 🎤 Interview Talking Points
-> *"To ensure thorough auditability without degrading UI performance, we designed a batching buffer for keystroke telemetry. Keystrokes are buffered in memory with timestamps and question IDs. Rather than synchronous I/O, a background worker flushes batches into an append-only JSONL stream (`keylogs.jsonl`). On application exit or session submission, a final synchronous flush ensures zero event loss."*
 
 ---
 
@@ -427,9 +411,6 @@ const removeFaceSnapshotListener = window.athena.onRequestFaceSnapshot(async ({ 
   }, 'image/jpeg', 0.85);
 });
 ```
-
-#### 🎤 Interview Talking Points
-> *"Instead of heavy continuous video streaming, we created a synchronized dual-capture system. Every 10 seconds, the Main process captures a desktop frame via `desktopCapturer` and simultaneously commands the renderer to extract the active webcam frame from the HTML5 video element. Both files are tagged with the identical ISO timestamp, enabling reviewers to view what was on the candidate's screen and their facial posture side-by-side."*
 
 ---
 
@@ -476,9 +457,6 @@ startClockTimer() {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"Timers in web browsers can be manipulated by changing system time or suffer from event-loop throttling. In Proctorly, the clock is strictly authoritative in the Electron Main process. The UI is merely a subscriber to `timer-tick` messages. When the countdown reaches zero, the main process guarantees automatic session closure and submission to the backend, regardless of client UI state."*
-
 ---
 
 ### Feature 8: Secure Context Bridge & Process Isolation (IPC)
@@ -517,9 +495,6 @@ safeSend(channel, payload) {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"We follow defense-in-depth principles for Electron security: `nodeIntegration` is disabled, and `contextIsolation` is enabled. All interactions between the React frontend and native capabilities pass through the `athena` namespace exposed via `contextBridge`. In addition, we safeguard against runtime instability by wrapping IPC in `safeSend()` (preventing crashes during window navigation) and attaching error handlers to standard I/O streams to gracefully handle detached terminals without displaying modal error dialogs."*
-
 ---
 
 ### Feature 9: Fault-Tolerant Atomic File Storage & Crash Recovery
@@ -553,9 +528,6 @@ function saveSessions(sessions) {
 }
 ```
 
-#### 🎤 Interview Talking Points
-> *"In a JSON-backed storage architecture, concurrent writes risk file corruption. To ensure ACID-like persistence without an external database, we implemented atomic file replacement: writes are completed to a temporary file (`.tmp`) and then atomically renamed via `fs.renameSync()`. If the server crashes during write, the primary `sessions.json` remains undamaged."*
-
 ---
 
 ### Feature 10: Dynamic Student Examination HUD & Violation Banner
@@ -573,54 +545,6 @@ In [`src/App.jsx`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/sr
 #### 📍 Exact Location
 - **HUD JSX**: [`src/App.jsx`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/src/App.jsx#L620-L710)
 - **Warning Banners & Recovery Overlay**: [`src/components/Quiz/Quiz.jsx`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/src/components/Quiz/Quiz.jsx#L235-L265)
-
----
-
-## 4. Interview Playbook: Top 10 Technical Questions & Model Answers
-
-### Q1: Why build Proctorly as an Electron desktop application rather than a pure web application?
-> **Answer**:  
-> *"Web browsers run in an OS-level sandbox that prevents access to low-level hardware and system diagnostics. In a pure web app, we cannot inspect the candidate's running processes to detect Zoom or Discord, we cannot intercept OS-level shortcuts like Alt+Tab or Cmd+Space, and we cannot reliably capture the entire desktop beyond the browser tab without intrusive browser prompts. Electron gives us native Node.js and OS API bindings while retaining a modern React UI."*
-
-### Q2: How did you ensure security between the Electron Main process and React Renderer?
-> **Answer**:  
-> *"We adhered strictly to the Electron Security Guide: `contextIsolation: true`, `nodeIntegration: false`, and `webSecurity: true`. The renderer cannot require Node modules like `fs` or `child_process`. Instead, we defined a secure `contextBridge` in `preload.js` named `window.athena`. The frontend only invokes predefined, validated IPC channels, preventing Remote Code Execution (RCE) in case of XSS."*
-
-### Q3: How do you prevent candidates from switching windows, using Alt+Tab, or swiping into Mission Control?
-> **Answer**:  
-> *"We use a multi-tiered lockdown: First, we engage Electron's native `win.setKiosk(true)`, which triggers macOS `NSApplicationPresentationDisableProcessSwitching`. This disables trackpad gestures like 3-finger swipe up (Mission Control) and Spaces switching, and suppresses the Dock and Menu Bar. Second, we elevate the window with `win.setAlwaysOnTop(true, 'screen-saver', 1)`, placing it at `NSScreenSaverWindowLevel` so no other desktop application can render above it. Third, if the window does lose focus, Electron's `blur` event triggers `handleFocusLost()`. This immediately wipes the OS clipboard via `clipboard.clear()`, takes an instantaneous desktop snapshot of the offending screen, flags the violation in the session log, and locks the exam interface until the student clicks 'Re-enter Fullscreen & Unlock Exam'."*
-
-### Q4: How does background application detection work cross-platform?
-> **Answer**:  
-> *"We built an OS-agnostic process query routine in `ProctoringController.getRunningProcesses()`. We inspect `process.platform`: if on Windows, we execute `tasklist /FO CSV /NH`; if on macOS or Linux, we execute `ps -eo comm=`. We normalize process names to lowercase and cross-reference them against our `BLOCKED_APPS` blacklist (such as `discord`, `zoom`, `obs`, `teamviewer`). If any are found, the exam start is blocked until the candidate closes them."*
-
-### Q5: How do you synchronize desktop screenshots and webcam frames without video streaming overhead?
-> **Answer**:  
-> *"Streaming continuous video from hundreds of students consumes excessive bandwidth and storage. We designed a dual-capture polling engine. Every 10 seconds, the main process grabs a desktop screenshot using `desktopCapturer.getSources({ types: ['screen'] })` and simultaneously sends an IPC message `request-face-snapshot` with the exact timestamp to the renderer. The renderer draws the current `<video>` frame onto an HTML `<canvas>`, serializes it to a JPEG ArrayBuffer, and sends it back. Both images are saved on disk with the same ISO timestamp, giving proctors synchronized visual evidence."*
-
-### Q6: Why is the countdown timer managed in the Electron Main process instead of React state?
-> **Answer**:  
-> *"JavaScript timers in browser environments (`setInterval` or `setTimeout`) are notoriously unreliable: browsers throttle background tabs to save battery, and high CPU usage in the renderer can cause clock drift. Furthermore, candidates could tamper with DOM state. Driving the timer in the Main process makes it authoritative; the React UI merely displays the `timer-tick` broadcast. When the timer expires, the Main process triggers `handleExamExpired()`, submitting the exam to the backend directly."*
-
-### Q7: How does the backend prevent data corruption when saving sessions without a database?
-> **Answer**:  
-> *"In `backend/server.js`, we implemented an atomic write pattern in `saveSessions()`. Rather than overwriting `sessions.json` directly, we serialize to a temporary file (`sessions.json.tmp`) and then execute `fs.renameSync()`. Because filesystem rename operations are atomic at the OS level, even if the server crashes or loses power during the write, `sessions.json` will never be left in a half-written or corrupted state."*
-
-### Q8: How did you implement keystroke logging without causing UI lag?
-> **Answer**:  
-> *"Synchronous file writes on every keystroke cause noticeable input latency. We resolved this by implementing an in-memory buffer in `ProctoringController`. Every key event is pushed to `this.keylogBuffer`. A worker flushes the accumulated buffer asynchronously every 5 seconds to an append-only JSONL stream (`keylogs.jsonl`). When the exam finishes, a final synchronous flush persists remaining keys. This provides full keystroke telemetry with zero frame drops."*
-
-### Q9: What happens if a candidate disconnects their webcam mid-exam?
-> **Answer**:  
-> *"We attach an `onended` listener directly to the camera's `MediaStreamTrack` in `App.jsx`. If the physical USB cable is unplugged or permissions are revoked, `track.onended` immediately fires. The UI notifies the student, and calls `window.athena.logMediaStatus('CAMERA_DISCONNECTED')`, which logs a high-severity violation on the backend and triggers an immediate desktop snapshot."*
-
-### Q10: How would you scale this architecture to support 100,000 concurrent candidates?
-> **Answer**:  
-> *"Currently, the backend uses local JSON file persistence suited for standalone/institutional setups. To scale to 100k students:
-> 1. **Storage**: Replace JSON file writes with a distributed database like PostgreSQL or MongoDB with read-replicas.
-> 2. **Media Storage**: Offload screenshots and webcam snapshots directly to an S3/Cloud Storage bucket using pre-signed URLs, relieving backend server bandwidth.
-> 3. **Telemetry Ingestion**: Stream keystrokes and security flags into an Apache Kafka or AWS Kinesis topic for asynchronous processing.
-> 4. **AI Anomaly Detection**: Introduce computer vision models (e.g., face orientation, multiple faces detected, eye gaze tracking) directly into the snapshot evaluation pipeline."*
 
 ---
 
