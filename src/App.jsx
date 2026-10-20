@@ -15,7 +15,7 @@ import {
   XCircle
 } from 'lucide-react';
 
-const isElectron = typeof window !== 'undefined' && !!window.athena;
+const isElectron = typeof window !== 'undefined' && !!(window.proctorly || window.athena);
 
 // ─── Universal Cross-Platform / Cross-Browser Fullscreen Helpers ───────────
 async function enterFullscreenUniversal() {

@@ -74,7 +74,7 @@ For a comprehensive breakdown of the system design, exact function locations, an
 Proctorly/
 ├── app/
 │   ├── app.js                   # Electron main process & window management
-│   ├── preload.js               # Context bridge exposing secure Athena proctoring API
+│   ├── preload.js               # Context bridge exposing secure Proctorly proctoring API
 │   └── proctoringController.js  # Proctoring engine (detections, captures, timers)
 ├── backend/
 │   ├── data/

@@ -21,6 +21,7 @@ dist/
 dist-electron/
 build/
 out/
+release/
 
 # Proctoring session logs and captured media
 .sessions
@@ -53,6 +54,7 @@ ehthumbs.db
 *.sw?
 
 # Local interview notes & talking points
+docs/UNUSED_CODE_AUDIT.md
 docs/INTERVIEW_TALKING_POINTS.md
 *INTERVIEW*
 *interview*

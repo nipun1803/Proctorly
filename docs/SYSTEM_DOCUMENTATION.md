@@ -32,7 +32,7 @@
 
 Proctorly employs a **three-tier isolated architecture**:
 1. **Renderer Process (React + Vite)**: Renders the exam questions, webcams preview, and alerts. Zero direct access to Node.js or OS APIs.
-2. **Preload Script (`contextBridge`)**: Strictly validated sandbox bridge exposing the `window.athena` API.
+2. **Preload Script (`contextBridge`)**: Strictly validated sandbox bridge exposing the `window.proctorly` API.
 3. **Main Process (Electron)**: Orchestrates native window bounds, global shortcuts, screen capture, and process inspection.
 4. **Backend Daemon (Express.js)**: Spawned via child process (`fork`), handling atomic session logs, assessment evaluation, and media storage.
 
@@ -45,7 +45,7 @@ graph TB
     end
 
     subgraph Sandbox["Secure Preload Bridge (app/preload.js)"]
-        AthenaBridge["window.athena (contextBridge)<br/>- IPC Invokers (send / invoke)<br/>- IPC Listeners (on / removeListener)"]
+        ProctorlyBridge["window.proctorly (contextBridge)<br/>- IPC Invokers (send / invoke)<br/>- IPC Listeners (on / removeListener)"]
     end
 
     subgraph MainProcess["Electron Main Process (app/app.js)"]
@@ -59,11 +59,11 @@ graph TB
         AtomicStorage["Atomic File Persistence<br/>- tmp file write + fs.renameSync<br/>- backend/data/sessions.json<br/>- backend/data/sessions/{sessionId}/"]
     end
 
-    UI -->|"Calls window.athena API"| AthenaBridge
-    WebcamStream -->|"Converts frame to Blob"| AthenaBridge
-    DomEvents -->|"Forward keydown events"| AthenaBridge
+    UI -->|"Calls window.proctorly API"| ProctorlyBridge
+    WebcamStream -->|"Converts frame to Blob"| ProctorlyBridge
+    DomEvents -->|"Forward keydown events"| ProctorlyBridge
 
-    AthenaBridge -->|"IPC Invoke: 'start-exam-session', etc."| WinManager
+    ProctorlyBridge -->|"IPC Invoke: 'start-exam-session', etc."| WinManager
     WinManager -->|"Delegates commands"| Controller
     Controller -->|"Low-level OS checks"| OS_Hooks
     Controller -->|"HTTP REST Telemetry"| ExpressApp
@@ -391,7 +391,7 @@ Proctorly uses **synchronized dual-capture**:
 #### 💻 Code Snippet
 ```javascript
 // src/App.jsx (Lines 221-245) - Frame extraction in Renderer
-const removeFaceSnapshotListener = window.athena.onRequestFaceSnapshot(async ({ timestamp }) => {
+const removeFaceSnapshotListener = window.proctorly.onRequestFaceSnapshot(async ({ timestamp }) => {
   if (examState !== 'ACTIVE' || !videoRef.current) return;
   
   const video = videoRef.current;
@@ -406,7 +406,7 @@ const removeFaceSnapshotListener = window.athena.onRequestFaceSnapshot(async ({ 
     if (blob) {
       const buffer = await blob.arrayBuffer();
       // Send binary frame to Main Process with matching timestamp
-      window.athena.storeFaceSnapshot(buffer, timestamp);
+      window.proctorly.storeFaceSnapshot(buffer, timestamp);
     }
   }, 'image/jpeg', 0.85);
 });
@@ -468,7 +468,7 @@ Allowing Node.js access inside the React renderer creates catastrophic security 
 Proctorly enforces strict Electron security and fault-tolerance best practices:
 1. `contextIsolation: true` and `nodeIntegration: false` in `BrowserWindow` options.
 2. `Menu.setApplicationMenu(null)` to eliminate OS menu access.
-3. `preload.js` uses `contextBridge.exposeInMainWorld("athena", ...)` to expose only clean, parameter-checked wrapper functions.
+3. `preload.js` uses `contextBridge.exposeInMainWorld("proctorly", ...)` to expose only clean, parameter-checked wrapper functions.
 4. **Stream & Terminal Write Error Suppression**: Handlers on `process.stdout`/`stderr` suppress broken-pipe errors (`EIO` and `EPIPE`) so that running in detached terminal windows does not trigger unhandled exception dialogs.
 5. **Safe IPC Dispatching (`safeSend`)**: Validates `window.isDestroyed()`, `webContents.isCrashed()`, and frame availability before dispatching IPC messages.
 

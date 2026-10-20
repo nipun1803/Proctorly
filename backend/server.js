@@ -8,10 +8,10 @@ const PORT = 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use("/captures", express.static(path.join(__dirname, "data", "captures")));
 
+const dataDir = process.env.DATA_DIR || path.join(__dirname, "data");
 const questionsPath = path.join(__dirname, "data", "questions.json");
-const sessionsPath = process.env.SESSIONS_PATH || path.join(__dirname, "data", "sessions.json");
+const sessionsPath = process.env.SESSIONS_PATH || path.join(dataDir, "sessions.json");
 
 function readQuestions() {
   const all = JSON.parse(fs.readFileSync(questionsPath, "utf-8"));
@@ -99,7 +99,7 @@ app.post("/exam/start", (req, res) => {
   };
 
   // Ensure dedicated session directory and subfolders
-  const sessionDir = path.join(__dirname, "data", "sessions", session.sessionId);
+  const sessionDir = path.join(dataDir, "sessions", session.sessionId);
   const screenshotsDir = path.join(sessionDir, "screenshots");
   const camerashotsDir = path.join(sessionDir, "camerashots");
 
@@ -426,8 +426,8 @@ app.post("/exam/keylog", (req, res) => {
   session.keylogs.push(...entries);
   saveSessions(sessions);
 
-  // Synchronize with backend/data/sessions/<sessionId>/keylogs.json
-  const sessionDir = path.join(__dirname, "data", "sessions", sessionId);
+  // Synchronize with session keylogs.json
+  const sessionDir = path.join(dataDir, "sessions", sessionId);
   try {
     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
     const keylogsPath = path.join(sessionDir, "keylogs.json");

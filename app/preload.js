@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld("athena", {
+const proctorlyApi = {
     // ─── Proctoring Session Management ───────────────────────────────────────
     startExamSession: (params) => {
         return ipcRenderer.invoke('start-exam-session', params);
@@ -35,6 +35,9 @@ contextBridge.exposeInMainWorld("athena", {
     // ─── System & Process Checks ─────────────────────────────────────────────
     getBackgroundApps: () => {
         return ipcRenderer.invoke('get-background-apps');
+    },
+    checkDisplays: () => {
+        return ipcRenderer.invoke('check-displays');
     },
 
     // ─── Activity & Media Event Logging ──────────────────────────────────────
@@ -93,41 +96,8 @@ contextBridge.exposeInMainWorld("athena", {
         const fn = (_event) => callback();
         ipcRenderer.on('window-focus-restored', fn);
         return () => ipcRenderer.removeListener('window-focus-restored', fn);
-    },
-
-    // ─── Legacy Adapters for Compatibility ───────────────────────────────────
-    registerListenerForTimerTickFromMain: (callback) => {
-        const fn = (_event, data) => callback(typeof data === 'object' ? data.elapsed : data);
-        ipcRenderer.on('timer-tick', fn);
-        return () => ipcRenderer.removeListener('timer-tick', fn);
-    },
-    registerListenerForCameraSnapFromMain: (callback) => {
-        const fn = (_event, data) => callback(data);
-        ipcRenderer.on('request-face-snapshot', fn);
-        return () => ipcRenderer.removeListener('request-face-snapshot', fn);
-    },
-    registerListenerForBlockedKeybinding: (callback) => {
-        const fn = (_event, data) => callback(data);
-        ipcRenderer.on('blocked-keybinding', fn);
-        return () => ipcRenderer.removeListener('blocked-keybinding', fn);
-    },
-    registerListenerForFullscreenExit: (callback) => {
-        const fn = () => callback();
-        ipcRenderer.on('fullscreen-exited', fn);
-        return () => ipcRenderer.removeListener('fullscreen-exited', fn);
-    },
-    registerListenerForDurationExceeded: (callback) => {
-        const fn = () => callback();
-        ipcRenderer.on('exam-expired', fn);
-        return () => ipcRenderer.removeListener('exam-expired', fn);
-    },
-    storeCameraSnapImageOnDisk: (data, sessionId) => {
-        return ipcRenderer.invoke('store-camera-snap-image-on-disk', data, sessionId);
-    },
-    captureScreen: (sessionId) => {
-        return ipcRenderer.invoke('capture-screen', sessionId);
-    },
-    setSessionId: (sessionId) => {
-        return ipcRenderer.invoke('set-session-id', sessionId);
     }
-});
+};
+
+contextBridge.exposeInMainWorld("proctorly", proctorlyApi);
+contextBridge.exposeInMainWorld("athena", proctorlyApi);

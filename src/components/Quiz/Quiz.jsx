@@ -19,7 +19,6 @@ export default function Quiz({ sessionId, timer, restoredAnswers, examLocked, on
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [markedForReview, setMarkedForReview] = useState(new Set());
   const [viewedQuestions, setViewedQuestions] = useState(new Set([0]));
-  const [showGrid, setShowGrid] = useState(true);
 
   // Fetch exactly 5 questions
   useEffect(() => {

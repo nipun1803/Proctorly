@@ -41,7 +41,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 import electron from "electron";
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, session, screen, Menu, clipboard } = electron;
+const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, session, Menu, clipboard } = electron;
 import path from "path";
 import fs from "fs";
 import { fork } from "child_process";
@@ -88,7 +88,7 @@ function createWindow() {
         minHeight: 700,
         fullscreen: false,
         fullscreenable: true,
-        kiosk: false,
+        kiosk: true,
         frame: false,
         autoHideMenuBar: true,
         webPreferences: {
@@ -283,6 +283,11 @@ ipcMain.handle('get-background-apps', async () => {
     return await ProctoringController.getRunningProcesses();
 });
 
+// Multi-display verification
+ipcMain.handle('check-displays', () => {
+    return ProctoringController.checkDisplays();
+});
+
 // Flag activity to backend and session events
 ipcMain.handle('flag-activity', async (_event, flagType, details, questionId) => {
     proctoringController.logEvent(flagType, questionId, { details });
@@ -295,30 +300,26 @@ ipcMain.handle('log-media-status', async (_event, eventType, details, questionId
     await proctoringController.flagBackend(eventType, details, questionId);
 });
 
-// Legacy backward-compatibility adapters
-ipcMain.handle('set-session-id', (_event, sessionId) => {
-    if (proctoringController.session) {
-        proctoringController.session.sessionId = sessionId;
-    }
-});
-
-ipcMain.handle('store-camera-snap-image-on-disk', async (_event, data, _sessionId) => {
-    const ts = proctoringController.getTimestamp();
-    return await proctoringController.saveFaceSnapshot(data, ts);
-});
-
-ipcMain.handle('capture-screen', async () => {
-    return await proctoringController.captureImmediate('MANUAL_OR_LEGACY');
-});
-
+// Keystroke logging from renderer
 ipcMain.handle('log-key', (_event, data) => {
     proctoringController.recordKeylog(data);
 });
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-    const serverPath = path.join(import.meta.dirname, '../backend/server.js');
-    const sessionsPath = path.join(import.meta.dirname, '../backend/data/sessions.json');
+    const isPackaged = app.isPackaged;
+    const serverPath = isPackaged
+        ? path.join(process.resourcesPath, 'app.asar.unpacked/backend/server.js')
+        : path.join(import.meta.dirname, '../backend/server.js');
+
+    const dataDir = isPackaged
+        ? path.join(app.getPath('userData'), 'data')
+        : path.join(import.meta.dirname, '../backend/data');
+
+    if (!fs.existsSync(dataDir)) {
+        try { fs.mkdirSync(dataDir, { recursive: true }); } catch { }
+    }
+    const sessionsPath = path.join(dataDir, 'sessions.json');
     
     // Only fork backend if not already running on port 3000
     fetch('http://localhost:3000/exam/mcq')
@@ -328,7 +329,7 @@ app.whenReady().then(() => {
         .catch(() => {
             try {
                 backendProcess = fork(serverPath, [], {
-                    env: { ...process.env, SESSIONS_PATH: sessionsPath },
+                    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SESSIONS_PATH: sessionsPath, DATA_DIR: dataDir },
                     stdio: ['ignore', 'ignore', 'ignore', 'ipc']
                 });
                 backendProcess.on('error', (err) => {

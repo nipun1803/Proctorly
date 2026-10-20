@@ -1,19 +1,9 @@
-// ─── Stream & Error Protection ─────────
-for (const stream of [process.stdout, process.stderr]) {
-    if (stream && typeof stream.on === 'function') {
-        stream.on('error', (err) => {
-            if (err && (err.code === 'EPIPE' || err.code === 'EIO' || err.message?.includes('write EIO') || err.message?.includes('write EPIPE'))) {
-                return;
-            }
-        });
-    }
-}
-
 import fs from 'fs';
 import path from 'path';
 import electron from 'electron';
-const { app, desktopCapturer, screen, globalShortcut } = electron;
 import { exec } from 'child_process';
+
+const { desktopCapturer, globalShortcut } = electron;
 
 export const EXAM_STATES = {
     PRE_EXAM: 'PRE_EXAM',
@@ -33,50 +23,10 @@ export const BLOCKED_APPS = [
     'whatsapp', 'messenger', 'signal', 'line'
 ];
 
-export const BLOCKED_KEYS = [
-    { ctrl: true, key: 'c' },
-    { ctrl: true, key: 'v' },
-    { ctrl: true, key: 'x' },
-    { ctrl: true, key: 'a' },
-    { ctrl: true, key: 'p' },
-    { ctrl: true, key: 's' },
-    { ctrl: true, key: 'f' },
-    { ctrl: true, key: 'u' },
-    { ctrl: true, key: 'r' },
-    { ctrl: true, shift: true, key: 'r' },
-    { ctrl: true, shift: true, key: 'i' },
-    { ctrl: true, shift: true, key: 'j' },
-    { ctrl: true, shift: true, key: 'c' },
-    { meta: true, key: 'c' },
-    { meta: true, key: 'v' },
-    { meta: true, key: 'x' },
-    { meta: true, key: 'a' },
-    { meta: true, key: 'p' },
-    { meta: true, key: 's' },
-    { meta: true, key: 'f' },
-    { meta: true, key: 'u' },
-    { meta: true, key: 'r' },
-    { meta: true, shift: true, key: 'r' },
-    { meta: true, shift: true, key: 'i' },
-    { meta: true, shift: true, key: 'j' },
-    { meta: true, shift: true, key: 'c' },
-    { meta: true, key: 'h' },
-    { meta: true, key: 'w' },
-    { meta: true, key: 'm' },
-    { meta: true, key: 'Tab' },
-    { alt: true, key: 'Tab' },
-    { meta: true, key: ' ' },
-    { meta: true, alt: true, key: 'Escape' },
-    { ctrl: true, key: 'ArrowUp' },
-    { ctrl: true, key: 'ArrowDown' },
-    { ctrl: true, key: 'ArrowLeft' },
-    { ctrl: true, key: 'ArrowRight' },
-    { alt: true, key: 'F4' },
-    { key: 'PrintScreen' },
-    { key: 'F3' },
-    { key: 'F11' },
-    { key: 'F12' }
-];
+// Blocked key sets for high-performance O(1) input interception
+const BLOCKED_CMD_CTRL_KEYS = new Set(['c', 'v', 'x', 'a', 'p', 's', 'f', 'u', 'r', 'h', 'w', 'm', 'tab', ' ']);
+const BLOCKED_SHIFT_KEYS = new Set(['r', 'i', 'j', 'c']);
+const BLOCKED_SYSTEM_KEYS = new Set(['printscreen', 'f3', 'f4', 'f11', 'f12', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
 
 export class ProctoringController {
     constructor() {
@@ -84,90 +34,93 @@ export class ProctoringController {
         this.window = null;
         this.session = null;
         this.currentQuestionId = 1;
-        this.captureIntervalMs = 10000; // Synchronized capture every 10s
+        this.captureIntervalMs = 10000;
         this.captureTimer = null;
         this.clockTimer = null;
         this.kioskEnforceTimer = null;
         this.keylogBuffer = [];
         this.keylogFlushTimer = null;
         this.backendUrl = 'http://localhost:3000';
-        this.isTransitioningFullscreen = false;
-        this.lastFocusLostTime = 0;
+    }
+
+    initDisplayMonitoring() {
+        try {
+            if (electron.screen) {
+                electron.screen.on('display-added', () => {
+                    if (this.state === EXAM_STATES.ACTIVE) {
+                        this.flagBackend('EXTERNAL_DISPLAY_DETECTED', 'Secondary display connected during exam', this.currentQuestionId);
+                        this.captureImmediate('EXTERNAL_DISPLAY_DETECTED');
+                        this.safeSend('external-display-detected', { count: electron.screen.getAllDisplays().length });
+                        this.reclaimFocus();
+                    }
+                });
+            }
+        } catch {}
     }
 
     setWindow(win) {
         this.window = win;
+        this.initDisplayMonitoring();
+        // If window is already kiosk on creation, apply macOS workspace pinning safely
+        if (this.window && !this.window.isDestroyed() && this.window.isKiosk()) {
+            this.enterExamFullscreen();
+        }
     }
 
+    // ─── Kiosk & Display Lockdown ───────────────────────────────────────────
     enterExamFullscreen() {
         if (!this.window || this.window.isDestroyed()) return;
-        if (this.window.isKiosk() && this.window.isFullScreen()) return;
-        if (this.isTransitioningFullscreen) return;
-
-        this.isTransitioningFullscreen = true;
         try {
             this.window.setFullScreenable(true);
+            // On macOS: pin window to ALL spaces/virtual desktops so 3-finger swipe does NOT switch screens
+            if (process.platform === 'darwin') {
+                this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+            }
+            // Elevate window level above Mission Control, Dock, and other apps
             this.window.setAlwaysOnTop(true, 'screen-saver', 1);
-            this.window.setKiosk(true);
+            if (!this.window.isKiosk()) this.window.setKiosk(true);
+            if (!this.window.isFullScreen()) this.window.setFullScreen(true);
+            this.window.moveTop();
             this.window.focus();
         } catch (err) {
-            console.warn('Failed to enter kiosk mode:', err);
-            try {
-                this.window.setFullScreen(true);
-                this.window.focus();
-            } catch (fsErr) {
-                console.warn('Fallback setFullScreen error:', fsErr);
-            }
-        } finally {
-            setTimeout(() => {
-                this.isTransitioningFullscreen = false;
-            }, 1200);
+            console.warn('Failed to enter kiosk mode:', err.message);
         }
     }
 
     exitExamFullscreen() {
         if (!this.window || this.window.isDestroyed()) return;
-        if (!this.window.isKiosk() && !this.window.isFullScreen()) return;
-        if (this.isTransitioningFullscreen) return;
-
-        this.isTransitioningFullscreen = true;
         try {
-            if (this.window.isKiosk()) {
-                this.window.setKiosk(false);
+            if (process.platform === 'darwin') {
+                this.window.setVisibleOnAllWorkspaces(false);
             }
             this.window.setAlwaysOnTop(false);
-            if (this.window.isFullScreen()) {
-                this.window.setFullScreen(false);
-            }
+            if (this.window.isKiosk()) this.window.setKiosk(false);
+            if (this.window.isFullScreen()) this.window.setFullScreen(false);
         } catch (err) {
-            console.warn('Failed to exit kiosk mode:', err);
-        } finally {
-            setTimeout(() => {
-                this.isTransitioningFullscreen = false;
-            }, 1200);
+            console.warn('Failed to exit kiosk mode:', err.message);
         }
     }
 
-    safeSend(channel, payload) {
-        if (!this.window || this.window.isDestroyed()) {
-            return false;
-        }
+    reclaimFocus() {
+        if (!this.window || this.window.isDestroyed()) return;
         try {
-            const wc = this.window.webContents;
-            if (!wc || wc.isDestroyed()) {
-                return false;
+            if (process.platform === 'darwin') {
+                this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
             }
-            if (typeof wc.isCrashed === 'function' && wc.isCrashed()) {
-                return false;
+            this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+            this.window.moveTop();
+            this.window.focus();
+        } catch {}
+    }
+
+    safeSend(channel, payload) {
+        try {
+            if (this.window && !this.window.isDestroyed() && this.window.webContents && !this.window.webContents.isDestroyed()) {
+                this.window.webContents.send(channel, payload);
+                return true;
             }
-            if (!wc.mainFrame) {
-                return false;
-            }
-            wc.send(channel, payload);
-            return true;
-        } catch {
-            return false;
-        }
+        } catch {}
+        return false;
     }
 
     getState() {
@@ -182,45 +135,31 @@ export class ProctoringController {
         const num = Number(qId);
         if (!isNaN(num) && num > 0) {
             this.currentQuestionId = num;
-            if (this.state === EXAM_STATES.ACTIVE) {
-                this.logEvent('QUESTION_VIEWED', this.currentQuestionId);
-            }
         }
     }
 
     getTimestamp() {
-        // Safe for filenames: e.g. 2026-09-30T15-20-01-123Z
         return new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
     }
 
     getSessionDir() {
-        if (!this.session || !this.session.sessionId) {
-            return null;
-        }
-        return path.join(import.meta.dirname, '../backend/data/sessions', this.session.sessionId);
+        if (!this.session?.sessionId) return null;
+        const dataDir = electron.app?.isPackaged
+            ? path.join(electron.app.getPath('userData'), 'data')
+            : path.join(import.meta.dirname, '../backend/data');
+        return path.join(dataDir, 'sessions', this.session.sessionId);
     }
 
     ensureSessionDirs() {
-        const sessionDir = this.getSessionDir();
-        if (!sessionDir) return;
-        const screenshotsDir = path.join(sessionDir, 'screenshots');
-        const camerashotsDir = path.join(sessionDir, 'camerashots');
-        if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
-        if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
-        if (!fs.existsSync(camerashotsDir)) fs.mkdirSync(camerashotsDir, { recursive: true });
-
-        const keylogsPath = path.join(sessionDir, 'keylogs.json');
-        if (!fs.existsSync(keylogsPath)) {
-            fs.writeFileSync(keylogsPath, '[]', 'utf-8');
-        }
+        const dir = this.getSessionDir();
+        if (!dir) return;
+        fs.mkdirSync(path.join(dir, 'screenshots'), { recursive: true });
+        fs.mkdirSync(path.join(dir, 'camerashots'), { recursive: true });
     }
 
-    // ─── Session Initialization ──────────────────────────────────────────────
+    // ─── Session Lifecycle ───────────────────────────────────────────────────
     async startSession({ sessionId, studentId, studentName, mode = 'PROCTORED', durationSec = 1800 }) {
-        if (this.state === EXAM_STATES.ACTIVE) {
-            console.warn('Session already active');
-            return this.session;
-        }
+        if (this.state === EXAM_STATES.ACTIVE) return this.session;
 
         this.state = EXAM_STATES.STARTING;
         const startedAt = new Date().toISOString();
@@ -235,21 +174,17 @@ export class ProctoringController {
             submittedAt: null,
             expiresAt,
             durationSec,
-            status: EXAM_STATES.ACTIVE,
-            files: [],
-            screenshots: [],
-            cameraShots: [],
-            keylogs: [],
-            flags: []
+            status: EXAM_STATES.ACTIVE
         };
 
         this.ensureSessionDirs();
-        this.saveMetadata();
 
-        // Log session start event
-        this.logEvent('EXAM_STARTED', this.currentQuestionId, { mode, durationSec });
+        // Check for multiple monitors connected
+        const displayInfo = ProctoringController.checkDisplays();
+        if (displayInfo.isMultiDisplay) {
+            this.flagBackend('MULTI_DISPLAY_DETECTED', `Candidate started exam with ${displayInfo.count} connected displays`, this.currentQuestionId);
+        }
 
-        // Configure window for exam mode
         if (this.window && !this.window.isDestroyed()) {
             if (mode === 'PROCTORED') {
                 this.enterExamFullscreen();
@@ -258,72 +193,45 @@ export class ProctoringController {
             this.window.focus();
         }
 
-        // Register global shortcuts to block OS-level switching and screenshot shortcuts
         this.registerGlobalShortcuts();
-
-        // Start continuous kiosk & focus watchdog
         this.startKioskEnforcement();
-
         this.state = EXAM_STATES.ACTIVE;
-
-        // Start authoritative clock timer (1s interval)
         this.startClockTimer();
-
-        // Start authoritative synchronized evidence capture
         this.startCaptureScheduler();
 
         return this.session;
     }
 
-    // ─── Stop and Finalize Session ───────────────────────────────────────────
     async stopSession(endState = EXAM_STATES.SUBMITTED, reason = 'Normal submission') {
-        if (this.state !== EXAM_STATES.ACTIVE && this.state !== EXAM_STATES.STARTING) {
-            return;
-        }
+        if (this.state !== EXAM_STATES.ACTIVE && this.state !== EXAM_STATES.STARTING) return;
 
         this.state = EXAM_STATES.SUBMITTING;
-
-        // 1. Stop all capture, tick intervals, and kiosk watchdog
         this.stopCaptureScheduler();
         this.stopClockTimer();
         this.stopKioskEnforcement();
         this.unregisterGlobalShortcuts();
-
-        // 2. Release window fullscreen
         this.exitExamFullscreen();
-
-        // 3. Flush pending keylogs and write final event
         this.flushKeylogs();
+
         const eventType = endState === EXAM_STATES.EXPIRED ? 'EXAM_EXPIRED' : (endState === EXAM_STATES.ABORTED ? 'EXAM_ABORTED' : 'EXAM_SUBMITTED');
         this.logEvent(eventType, this.currentQuestionId, { reason });
 
-        // 4. Update session metadata
         if (this.session) {
             this.session.status = endState;
             this.session.submittedAt = new Date().toISOString();
-            this.saveMetadata();
         }
 
         this.state = endState;
-
-        // Notify renderer of state change
-        this.safeSend('exam-state-changed', {
-            state: this.state,
-            sessionId: this.session?.sessionId
-        });
+        this.safeSend('exam-state-changed', { state: this.state, sessionId: this.session?.sessionId });
     }
 
-    // ─── Synchronized Evidence Capture ────────────────────────────────────────
+    // ─── Dual Synchronized Evidence Capture ──────────────────────────────────
     startCaptureScheduler() {
         this.stopCaptureScheduler();
-        // Initial capture after 3s of starting
         setTimeout(() => {
-            if (this.state === EXAM_STATES.ACTIVE) {
-                this.triggerSynchronizedCapture();
-            }
+            if (this.state === EXAM_STATES.ACTIVE) this.triggerSynchronizedCapture();
         }, 3000);
 
-        // Periodic synchronized capture
         this.captureTimer = setInterval(() => {
             if (this.state !== EXAM_STATES.ACTIVE || !this.window || this.window.isDestroyed()) {
                 this.stopCaptureScheduler();
@@ -342,18 +250,8 @@ export class ProctoringController {
 
     async triggerSynchronizedCapture() {
         if (this.state !== EXAM_STATES.ACTIVE || !this.session) return;
-
         const timestamp = this.getTimestamp();
-
-        // 1. Capture Desktop Screen
-        try {
-            await this.captureDesktop(timestamp);
-        } catch (err) {
-            console.error('Desktop capture failed:', err);
-            this.logEvent('CAPTURE_FAILED', this.currentQuestionId, { type: 'screen', error: err.message });
-        }
-
-        // 2. Request Face Frame from Renderer with the EXACT same timestamp
+        await this.captureDesktop(timestamp);
         this.safeSend('request-face-snapshot', { timestamp });
     }
 
@@ -363,71 +261,51 @@ export class ProctoringController {
         if (!sessionDir) return;
 
         let pngBuffer = null;
-
-        // 1. Attempt desktopCapturer for primary screen
         try {
-            const primaryDisplay = screen.getPrimaryDisplay();
-            const { width, height } = primaryDisplay.size;
-            const scaleFactor = primaryDisplay.scaleFactor || 1;
-
+            const primary = electron.screen?.getPrimaryDisplay();
+            if (!primary) return;
+            const { width, height } = primary.size;
+            const scale = primary.scaleFactor || 1;
             const sources = await desktopCapturer.getSources({
                 types: ['screen', 'window'],
                 thumbnailSize: {
-                    width: Math.min(1920, Math.floor(width * scaleFactor)),
-                    height: Math.min(1080, Math.floor(height * scaleFactor))
+                    width: Math.min(1920, Math.floor(width * scale)),
+                    height: Math.min(1080, Math.floor(height * scale))
                 }
             });
-
-            if (sources && sources.length > 0) {
+            if (sources?.length > 0) {
                 const screenSource = sources.find(s => s.id.startsWith('screen:')) || sources[0];
                 pngBuffer = screenSource.thumbnail.toPNG();
             }
-        } catch {
-            // desktopCapturer may lack macOS Screen Recording permission
-        }
+        } catch {}
 
-        // 2. Reliable fallback: capture exam window via webContents.capturePage()
         if ((!pngBuffer || pngBuffer.length === 0) && this.window && !this.window.isDestroyed()) {
             try {
-                const image = await this.window.webContents.capturePage();
-                pngBuffer = image.toPNG();
-            } catch {
-                // Secondary fallback
-            }
+                const img = await this.window.webContents.capturePage();
+                pngBuffer = img.toPNG();
+            } catch {}
         }
 
-        if (pngBuffer && pngBuffer.length > 0) {
+        if (pngBuffer?.length > 0) {
             const filename = `${timestamp}.png`;
             const filePath = path.join(sessionDir, 'screenshots', filename);
-
             try {
                 fs.writeFileSync(filePath, pngBuffer);
-                const record = {
-                    sessionId: this.session.sessionId,
-                    type: 'screen',
-                    filename,
-                    timestamp,
-                    questionId: this.currentQuestionId,
-                    path: path.relative(path.join(import.meta.dirname, '..'), filePath)
-                };
-
-                this.session.files.push(record);
-                if (!this.session.screenshots) this.session.screenshots = [];
-                this.session.screenshots.push(record);
-
-                this.saveMetadata();
-                this.logEvent('SCREENSHOT_CAPTURED', this.currentQuestionId, { filename });
-
-                // Synchronize capture with backend sessions.json
                 fetch(`${this.backendUrl}/exam/capture`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(record)
+                    body: JSON.stringify({
+                        sessionId: this.session.sessionId,
+                        type: 'screen',
+                        filename,
+                        timestamp,
+                        questionId: this.currentQuestionId,
+                        path: path.relative(path.join(import.meta.dirname, '..'), filePath)
+                    })
                 }).catch(() => {});
-
                 return filePath;
             } catch (err) {
-                console.warn('Failed to write screenshot file:', err.message);
+                console.warn('Failed saving screenshot:', err.message);
             }
         }
     }
@@ -439,36 +317,23 @@ export class ProctoringController {
 
         const filename = `${timestamp}.jpg`;
         const filePath = path.join(sessionDir, 'camerashots', filename);
-
         try {
             fs.writeFileSync(filePath, Buffer.from(arrayBuffer));
-
-            const record = {
-                sessionId: this.session.sessionId,
-                type: 'camera',
-                filename,
-                timestamp,
-                questionId: this.currentQuestionId,
-                path: path.relative(path.join(import.meta.dirname, '..'), filePath)
-            };
-
-            this.session.files.push(record);
-            if (!this.session.cameraShots) this.session.cameraShots = [];
-            this.session.cameraShots.push(record);
-
-            this.saveMetadata();
-            this.logEvent('FACE_CAPTURED', this.currentQuestionId, { filename });
-
-            // Synchronize capture with backend sessions.json
             fetch(`${this.backendUrl}/exam/capture`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(record)
+                body: JSON.stringify({
+                    sessionId: this.session.sessionId,
+                    type: 'camera',
+                    filename,
+                    timestamp,
+                    questionId: this.currentQuestionId,
+                    path: path.relative(path.join(import.meta.dirname, '..'), filePath)
+                })
             }).catch(() => {});
-
             return filePath;
         } catch (err) {
-            console.warn('Failed to write face snapshot file:', err.message);
+            console.warn('Failed saving face snapshot:', err.message);
         }
     }
 
@@ -478,39 +343,27 @@ export class ProctoringController {
             const timestamp = this.getTimestamp();
             await this.captureDesktop(timestamp);
             this.logEvent('IMMEDIATE_CAPTURE', this.currentQuestionId, { reason, timestamp });
-        } catch (err) {
-            console.error('Immediate desktop capture failed:', err);
-        }
+        } catch {}
     }
 
-    // ─── Authoritative Exam Timer ─────────────────────────────────────────────
+    // ─── Authoritative Clock ─────────────────────────────────────────────────
     startClockTimer() {
         this.stopClockTimer();
         const startTime = Date.now();
         const totalSec = this.session?.durationSec || 1800;
 
-        // Emit initial tick immediately (at t=0) so renderer is updated right away
-        this.safeSend('timer-tick', {
-            elapsed: 0,
-            remaining: totalSec
-        });
+        this.safeSend('timer-tick', { elapsed: 0, remaining: totalSec });
 
         this.clockTimer = setInterval(() => {
             if (this.state !== EXAM_STATES.ACTIVE || !this.window || this.window.isDestroyed()) {
                 this.stopClockTimer();
                 return;
             }
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const remaining = Math.max(0, totalSec - elapsed);
+            this.safeSend('timer-tick', { elapsed, remaining });
 
-            const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
-            const remainingSec = Math.max(0, totalSec - elapsedSec);
-
-            this.safeSend('timer-tick', {
-                elapsed: elapsedSec,
-                remaining: remainingSec
-            });
-
-            // Expiration condition
-            if (remainingSec <= 0) {
+            if (remaining <= 0) {
                 this.handleExamExpired();
             }
         }, 1000);
@@ -525,26 +378,18 @@ export class ProctoringController {
 
     async handleExamExpired() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
-        console.log('Exam duration expired for session:', this.session?.sessionId);
-
-        // Lock answering and notify renderer
         this.safeSend('exam-expired');
-
-        // Call backend expire endpoint
         try {
             await fetch(`${this.backendUrl}/exam/expire`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId: this.session.sessionId })
+                body: JSON.stringify({ sessionId: this.session?.sessionId })
             });
-        } catch (err) {
-            console.error('Failed to notify backend of expiration:', err);
-        }
-
+        } catch {}
         await this.stopSession(EXAM_STATES.EXPIRED, 'Exam duration limit reached');
     }
 
-    // ─── Global Shortcuts & Kiosk Lockdown ──────────────────────────────────
+    // ─── Global Shortcuts & Continuous Lockdown Watchdog ────────────────────
     registerGlobalShortcuts() {
         this.unregisterGlobalShortcuts();
         const shortcuts = [
@@ -552,6 +397,16 @@ export class ProctoringController {
             'CommandOrControl+H',
             'CommandOrControl+M',
             'CommandOrControl+Alt+Escape',
+            'CommandOrControl+W',
+            'CommandOrControl+Tab',
+            'Alt+Tab',
+            'Alt+Escape',
+            'Control+Left',
+            'Control+Right',
+            'Control+Up',
+            'Control+Down',
+            'F3',
+            'F4',
             'F11',
             'F12'
         ];
@@ -559,36 +414,21 @@ export class ProctoringController {
         shortcuts.forEach(shortcut => {
             try {
                 globalShortcut.register(shortcut, () => {
-                    console.warn(`Blocked global shortcut: ${shortcut}`);
-                    this.recordKeylog({
-                        type: 'keyDown',
-                        key: shortcut,
-                        meta: shortcut.includes('Command'),
-                        control: shortcut.includes('Control'),
-                        alt: shortcut.includes('Alt'),
-                        shift: shortcut.includes('Shift')
-                    });
-                    this.logEvent('SHORTCUT_BLOCKED', this.currentQuestionId, { shortcut });
-                    this.flagBackend('SHORTCUT_BLOCKED', `Blocked global shortcut: ${shortcut}`, this.currentQuestionId);
-                    this.flushKeylogs();
-
-                    this.safeSend('blocked-keybinding', {
-                        key: shortcut,
-                        timestamp: new Date().toISOString()
-                    });
+                    if (this.state === EXAM_STATES.ACTIVE) {
+                        this.logEvent('SHORTCUT_BLOCKED', this.currentQuestionId, { shortcut });
+                        this.flagBackend('SHORTCUT_BLOCKED', `Blocked global shortcut: ${shortcut}`, this.currentQuestionId);
+                        this.safeSend('blocked-keybinding', { key: shortcut, timestamp: new Date().toISOString() });
+                        this.reclaimFocus();
+                    }
                 });
-            } catch (err) {
-                // Ignore registration errors on OS-protected shortcuts
-            }
+            } catch {}
         });
     }
 
     unregisterGlobalShortcuts() {
         try {
             globalShortcut.unregisterAll();
-        } catch {
-            // Ignore
-        }
+        } catch {}
     }
 
     startKioskEnforcement() {
@@ -598,12 +438,10 @@ export class ProctoringController {
                 this.stopKioskEnforcement();
                 return;
             }
-
-            // Only check when not actively in a transition
-            if (!this.isTransitioningFullscreen && !this.window.isKiosk() && !this.window.isFullScreen()) {
-                this.handleFullscreenExited();
+            if (!this.window.isKiosk() || !this.window.isFocused()) {
+                this.reclaimFocus();
             }
-        }, 1500);
+        }, 1000);
     }
 
     stopKioskEnforcement() {
@@ -613,38 +451,19 @@ export class ProctoringController {
         }
     }
 
-    // ─── Focus and Fullscreen Event Handlers ──────────────────────────────────
+    // ─── Window Event Handlers ───────────────────────────────────────────────
     async handleFocusLost() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
-
-        // Debounce to prevent rapid oscillation loops on macOS
-        const now = Date.now();
-        if (this.lastFocusLostTime && (now - this.lastFocusLostTime) < 3000) {
-            return;
-        }
-        this.lastFocusLostTime = now;
-
         console.warn('Window focus lost during active exam');
 
         this.logEvent('WINDOW_FOCUS_LOST', this.currentQuestionId);
         this.flagBackend('WINDOW_FOCUS_LOST', 'Window focus lost (possible application switch)', this.currentQuestionId);
-
-        // Attempt immediate screenshot to document desktop state
         await this.captureImmediate('WINDOW_FOCUS_LOST');
-
-        // Flush pending keylogs immediately
         this.flushKeylogs();
-
-        // Notify renderer
         this.safeSend('window-focus-lost');
 
-        // Gently reclaim focus in PROCTORED mode without aggressive stealing
         if (this.session?.mode === 'PROCTORED') {
-            setTimeout(() => {
-                if (this.window && !this.window.isDestroyed() && this.state === EXAM_STATES.ACTIVE) {
-                    this.window.focus();
-                }
-            }, 300);
+            this.reclaimFocus();
         }
     }
 
@@ -656,53 +475,37 @@ export class ProctoringController {
 
     async handleFullscreenExited() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
-        if (this.isTransitioningFullscreen) return;
         if (this.window && !this.window.isDestroyed() && (this.window.isFullScreen() || this.window.isKiosk())) {
             return;
         }
 
         console.warn('Fullscreen mode exited during active exam');
-
         this.logEvent('FULLSCREEN_EXITED', this.currentQuestionId);
         this.flagBackend('FULLSCREEN_EXITED', 'Fullscreen exited', this.currentQuestionId);
-
-        // Attempt immediate screenshot
         await this.captureImmediate('FULLSCREEN_EXITED');
         this.flushKeylogs();
-
-        // Lock exam answering in renderer
         this.safeSend('fullscreen-exited');
     }
 
     handleFullscreenRestored() {
         if (this.state !== EXAM_STATES.ACTIVE) return;
-        this.isTransitioningFullscreen = false;
         this.logEvent('FULLSCREEN_RESTORED', this.currentQuestionId);
         this.safeSend('fullscreen-restored');
     }
 
-    // ─── Input and Key Event Handling ─────────────────────────────────────────
+    // ─── Input & Keystroke Telemetry ─────────────────────────────────────────
     handleInputEvent(event, input) {
         if (this.state !== EXAM_STATES.ACTIVE) return;
 
-        // Log keydown events for exam evidence
         if (input.type === 'keyDown') {
             this.recordKeylog(input);
         }
 
-        // Check for blocked combinations
         if (this.isBlockedInput(input)) {
             event.preventDefault();
-            this.logEvent('SHORTCUT_BLOCKED', this.currentQuestionId, {
-                key: input.key,
-                ctrl: input.control,
-                meta: input.meta,
-                alt: input.alt,
-                shift: input.shift
-            });
+            this.logEvent('SHORTCUT_BLOCKED', this.currentQuestionId, { key: input.key });
             this.flagBackend('SHORTCUT_BLOCKED', `Blocked shortcut: ${input.key}`, this.currentQuestionId);
             this.flushKeylogs();
-
             this.safeSend('blocked-keybinding', {
                 key: input.key,
                 ctrl: input.control,
@@ -715,42 +518,31 @@ export class ProctoringController {
     }
 
     isBlockedInput(input) {
-        if (!input || !input.key) return false;
-        const keyLower = input.key.toLowerCase();
-        return BLOCKED_KEYS.some(combo => {
-            if (!combo.key || combo.key.toLowerCase() !== keyLower) return false;
+        if (!input?.key) return false;
+        const key = input.key.toLowerCase();
+        const hasCmdOrCtrl = !!(input.control || input.meta);
+        const hasShift = !!input.shift;
+        const hasAlt = !!input.alt;
 
-            const reqCtrl = !!combo.ctrl;
-            const reqMeta = !!combo.meta;
-            const reqAlt = !!combo.alt;
-            const reqShift = !!combo.shift;
-
-            const hasCtrl = !!input.control;
-            const hasMeta = !!input.meta;
-            const hasAlt = !!input.alt;
-            const hasShift = !!input.shift;
-
-            return (
-                reqCtrl === hasCtrl &&
-                reqMeta === hasMeta &&
-                reqAlt === hasAlt &&
-                reqShift === hasShift
-            );
-        });
+        if (hasCmdOrCtrl && hasShift && BLOCKED_SHIFT_KEYS.has(key)) return true;
+        if (hasCmdOrCtrl && hasAlt && key === 'escape') return true;
+        if (hasAlt && (key === 'tab' || key === 'f4')) return true;
+        if (hasCmdOrCtrl && (BLOCKED_CMD_CTRL_KEYS.has(key) || BLOCKED_SYSTEM_KEYS.has(key))) return true;
+        if (!hasCmdOrCtrl && !hasAlt && !hasShift && (key === 'printscreen' || key === 'f3' || key === 'f4' || key === 'f11' || key === 'f12')) {
+            return true;
+        }
+        return false;
     }
 
     recordKeylog(input) {
         if (!this.session) return;
-
         const modifiers = [];
         if (input.meta) modifiers.push('Cmd');
         if (input.control) modifiers.push('Ctrl');
         if (input.alt) modifiers.push('Alt');
         if (input.shift) modifiers.push('Shift');
         const key = input.key || input.code || 'Unknown';
-        const combo = modifiers.length > 0 && !modifiers.includes(key)
-            ? `${modifiers.join('+')}+${key}`
-            : key;
+        const combo = modifiers.length > 0 && !modifiers.includes(key) ? `${modifiers.join('+')}+${key}` : key;
 
         const entry = {
             sessionId: this.session.sessionId,
@@ -759,25 +551,16 @@ export class ProctoringController {
             eventType: input.type === 'keyDown' ? 'KEY_DOWN' : 'KEY_UP',
             key,
             combination: combo,
-            modifiers: {
-                meta: !!input.meta,
-                ctrl: !!input.control,
-                alt: !!input.alt,
-                shift: !!input.shift
-            },
+            modifiers: { meta: !!input.meta, ctrl: !!input.control, alt: !!input.alt, shift: !!input.shift },
             isBlocked: this.isBlockedInput(input)
         };
 
         this.keylogBuffer.push(entry);
 
-        // Immediate flush on modifiers or blocked shortcut attempts; rapid 100ms debounce for others
         if (entry.isBlocked || input.meta || input.control || input.alt) {
             this.flushKeylogs();
-        } else {
-            if (this.keylogFlushTimer) clearTimeout(this.keylogFlushTimer);
-            this.keylogFlushTimer = setTimeout(() => {
-                this.flushKeylogs();
-            }, 100);
+        } else if (!this.keylogFlushTimer) {
+            this.keylogFlushTimer = setTimeout(() => this.flushKeylogs(), 250);
         }
     }
 
@@ -786,57 +569,34 @@ export class ProctoringController {
             clearTimeout(this.keylogFlushTimer);
             this.keylogFlushTimer = null;
         }
-
         if (this.keylogBuffer.length === 0 || !this.session) return;
-        const sessionDir = this.getSessionDir();
-        if (!sessionDir) return;
-
         const batch = [...this.keylogBuffer];
         this.keylogBuffer = [];
 
-        // 1. Write formatted array to backend/data/sessions/<sessionId>/keylogs.json
-        const keylogsJsonPath = path.join(sessionDir, 'keylogs.json');
-        try {
-            let existingKeylogs = [];
-            if (fs.existsSync(keylogsJsonPath)) {
-                try {
-                    existingKeylogs = JSON.parse(fs.readFileSync(keylogsJsonPath, 'utf-8'));
-                } catch {
-                    existingKeylogs = [];
-                }
-            }
-            existingKeylogs.push(...batch);
-            fs.writeFileSync(keylogsJsonPath, JSON.stringify(existingKeylogs, null, 2), 'utf-8');
-        } catch (err) {
-            console.error('Failed updating session keylogs.json:', err.message);
+        // Append to local session log
+        const sessionDir = this.getSessionDir();
+        if (sessionDir) {
+            try {
+                const lines = batch.map(e => JSON.stringify(e)).join('\n') + '\n';
+                fs.appendFileSync(path.join(sessionDir, 'keylogs.jsonl'), lines);
+            } catch {}
         }
 
-        // 2. Append to keylogs.jsonl for stream log integrity
-        const keylogsPath = path.join(sessionDir, 'keylogs.jsonl');
-        const lines = batch.map(e => JSON.stringify(e)).join('\n') + '\n';
-        try {
-            fs.appendFileSync(keylogsPath, lines);
-        } catch (err) {
-            console.error('Failed to append keylogs.jsonl:', err);
-        }
-
-        // 3. Send to backend sessions.json
+        // Post batch to backend (backend atomically syncs sessions.json and keylogs.json)
         fetch(`${this.backendUrl}/exam/keylog`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionId: this.session.sessionId, keylogs: batch })
-        }).catch(err => {
-            console.error('Failed to send keylogs to backend:', err);
-        });
+        }).catch(() => {});
     }
 
-    // ─── Proctoring Events & Flags ────────────────────────────────────────────
+    // ─── Proctoring Events & Backend Flags ────────────────────────────────────
     logEvent(eventType, questionId = null, metadata = {}) {
         if (!this.session) return;
         const sessionDir = this.getSessionDir();
         if (!sessionDir) return;
 
-        const eventRecord = {
+        const record = {
             sessionId: this.session.sessionId,
             timestamp: new Date().toISOString(),
             eventType,
@@ -844,12 +604,9 @@ export class ProctoringController {
             metadata
         };
 
-        const eventsPath = path.join(sessionDir, 'events.jsonl');
         try {
-            fs.appendFileSync(eventsPath, JSON.stringify(eventRecord) + '\n');
-        } catch (err) {
-            console.error('Failed to write event record:', err);
-        }
+            fs.appendFileSync(path.join(sessionDir, 'events.jsonl'), JSON.stringify(record) + '\n');
+        } catch {}
     }
 
     async flagBackend(type, details = '', questionId = null) {
@@ -867,75 +624,57 @@ export class ProctoringController {
                 })
             });
         } catch (err) {
-            console.error('Failed to post flag to backend:', err);
             this.logEvent('BACKEND_UNAVAILABLE', questionId, { endpoint: '/exam/flag', error: err.message });
         }
     }
 
-    // ─── Manifest & Metadata File ─────────────────────────────────────────────
-    saveMetadata() {
-        if (!this.session) return;
-        const sessionDir = this.getSessionDir();
-        if (!sessionDir) return;
-
-        const metadataPath = path.join(sessionDir, 'metadata.json');
+    // ─── Multi-Display Verification ──────────────────────────────────────────
+    static checkDisplays() {
         try {
-            fs.writeFileSync(metadataPath, JSON.stringify(this.session, null, 2));
-        } catch (err) {
-            console.error('Failed to write session metadata:', err);
+            if (!electron.screen) return { count: 1, isMultiDisplay: false, displays: [] };
+            const displays = electron.screen.getAllDisplays();
+            const primaryId = electron.screen.getPrimaryDisplay()?.id;
+            return {
+                count: displays.length,
+                isMultiDisplay: displays.length > 1,
+                displays: displays.map(d => ({
+                    id: d.id,
+                    bounds: d.bounds,
+                    isPrimary: d.id === primaryId
+                }))
+            };
+        } catch {
+            return { count: 1, isMultiDisplay: false, displays: [] };
         }
     }
 
-    // ─── Process Enumeration for Background Apps ──────────────────────────────
+    // ─── Process Enumeration ─────────────────────────────────────────────────
     static getRunningProcesses() {
         return new Promise((resolve) => {
             const platform = process.platform;
-            let cmd;
-            if (platform === 'darwin') {
-                cmd = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`;
-            } else if (platform === 'win32') {
-                cmd = 'tasklist /FO CSV /NH';
-            } else {
-                cmd = 'ps -eo comm --no-headers | sort -u';
-            }
+            const cmd = platform === 'darwin'
+                ? `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`
+                : (platform === 'win32' ? 'tasklist /FO CSV /NH' : 'ps -eo comm --no-headers | sort -u');
 
             exec(cmd, (error, stdout) => {
-                if (error) {
-                    console.error('Process check failed:', error);
-                    resolve({ allApps: [], blockedApps: [] });
-                    return;
+                if (error || !stdout) {
+                    return resolve({ allApps: [], blockedApps: [] });
                 }
 
-                let appNames = [];
+                let apps = [];
                 if (platform === 'darwin') {
-                    appNames = stdout.split(',').map(n => n.trim()).filter(Boolean);
+                    apps = stdout.split(',').map(s => s.trim()).filter(Boolean);
                 } else if (platform === 'win32') {
-                    appNames = stdout.split('\n')
-                        .map(l => l.trim())
-                        .filter(Boolean)
-                        .map(l => {
-                            const m = l.match(/^"([^"]+)"/);
-                            return m ? m[1].replace('.exe', '') : null;
-                        })
+                    apps = stdout.split('\n')
+                        .map(l => (l.match(/^"([^"]+)"/) || [])[1]?.replace('.exe', ''))
                         .filter(Boolean);
-                    appNames = [...new Set(appNames)];
                 } else {
-                    appNames = stdout.split('\n').map(l => {
-                        const parts = l.trim().split('/');
-                        return parts[parts.length - 1];
-                    }).filter(Boolean);
-                    appNames = [...new Set(appNames)];
+                    apps = stdout.split('\n').map(l => l.trim().split('/').pop()).filter(Boolean);
                 }
 
-                const filtered = appNames.filter(name => {
-                    const lower = name.toLowerCase();
-                    return lower !== 'electron' && lower !== 'athena' && lower !== 'proctorly' && lower !== 'antigravity ide';
-                });
-
-                const blocked = filtered.filter(name => {
-                    const lower = name.toLowerCase();
-                    return BLOCKED_APPS.some(b => lower.includes(b));
-                });
+                const ignored = new Set(['electron', 'athena', 'proctorly', 'antigravity ide', 'system events']);
+                const filtered = [...new Set(apps)].filter(a => !ignored.has(a.toLowerCase()));
+                const blocked = filtered.filter(a => BLOCKED_APPS.some(b => a.toLowerCase().includes(b)));
 
                 resolve({ allApps: filtered, blockedApps: blocked });
             });
