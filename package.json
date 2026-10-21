@@ -29,7 +29,11 @@
     "mac": {
       "target": "dmg",
       "category": "public.app-category.education",
+      "icon": "build/icon.icns",
       "identity": null
+    },
+    "dmg": {
+      "icon": "build/icon.icns"
     }
   },
   "dependencies": {

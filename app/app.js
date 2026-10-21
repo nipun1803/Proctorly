@@ -90,6 +90,7 @@ function createWindow() {
         fullscreenable: true,
         kiosk: true,
         frame: false,
+        icon: path.join(import.meta.dirname, '../build/icon.png'),
         autoHideMenuBar: true,
         webPreferences: {
             webSecurity: true,

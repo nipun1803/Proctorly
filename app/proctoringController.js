@@ -79,8 +79,9 @@ export class ProctoringController {
             // Elevate window level above Mission Control, Dock, and other apps
             this.window.setAlwaysOnTop(true, 'screen-saver', 1);
             if (!this.window.isKiosk()) this.window.setKiosk(true);
-            if (!this.window.isFullScreen()) this.window.setFullScreen(true);
+            if (process.platform !== 'darwin' && !this.window.isFullScreen()) this.window.setFullScreen(true);
             this.window.moveTop();
+            if (electron.app?.focus) electron.app.focus({ steal: true });
             this.window.focus();
         } catch (err) {
             console.warn('Failed to enter kiosk mode:', err.message);
@@ -109,6 +110,7 @@ export class ProctoringController {
             }
             this.window.setAlwaysOnTop(true, 'screen-saver', 1);
             this.window.moveTop();
+            if (electron.app?.focus) electron.app.focus({ steal: true });
             this.window.focus();
         } catch {}
     }
@@ -456,15 +458,15 @@ export class ProctoringController {
         if (this.state !== EXAM_STATES.ACTIVE) return;
         console.warn('Window focus lost during active exam');
 
+        if (this.session?.mode === 'PROCTORED') {
+            this.reclaimFocus();
+        }
+
         this.logEvent('WINDOW_FOCUS_LOST', this.currentQuestionId);
         this.flagBackend('WINDOW_FOCUS_LOST', 'Window focus lost (possible application switch)', this.currentQuestionId);
         await this.captureImmediate('WINDOW_FOCUS_LOST');
         this.flushKeylogs();
         this.safeSend('window-focus-lost');
-
-        if (this.session?.mode === 'PROCTORED') {
-            this.reclaimFocus();
-        }
     }
 
     handleFocusRestored() {
@@ -503,6 +505,7 @@ export class ProctoringController {
 
         if (this.isBlockedInput(input)) {
             event.preventDefault();
+            this.reclaimFocus();
             this.logEvent('SHORTCUT_BLOCKED', this.currentQuestionId, { key: input.key });
             this.flagBackend('SHORTCUT_BLOCKED', `Blocked shortcut: ${input.key}`, this.currentQuestionId);
             this.flushKeylogs();

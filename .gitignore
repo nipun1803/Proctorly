@@ -19,7 +19,9 @@ backend/node_modules/
 # Vite & Electron build outputs
 dist/
 dist-electron/
-build/
+build/*
+!build/icon.icns
+!build/icon.png
 out/
 release/
 

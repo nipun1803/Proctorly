@@ -207,42 +207,55 @@ static getRunningProcesses() {
 ### Feature 2: Fullscreen Kiosk Mode & Multi-Display Guard
 
 #### 🎯 Problem & Threat Model
-Students can connect external monitors, projectors, or side-car screens to view answers on one monitor while keeping the exam active on another. On macOS, trackpad gestures (e.g. 3-finger swipe up for Mission Control or 3-finger swipe left/right between Spaces) allow users to slide the exam window aside and view background applications (browser windows, chat apps) without closing the exam window.
+Students can connect external monitors, projectors, or side-car screens to view answers on one monitor while keeping the exam active on another. On macOS, shortcut combinations such as `Command + Tab` or trackpad gestures (e.g. 3-finger swipe left/right between Spaces) allow users to cycle to background applications or slide the exam window aside if the window is bound to a separate virtual Space.
 
 #### 💡 Architectural Solution
 1. **Multi-Display Check**: `checkDisplays()` queries Electron's `screen.getAllDisplays()`. If `displays.length > 1`, the system detects an external display and denies exam start.
-2. **Native Kiosk Mode**: Electron's `win.setKiosk(true)` engages macOS system presentation options (`NSApplicationPresentationDisableProcessSwitching`). This programmatically suppresses Mission Control gestures, Spaces switching, the Dock, and the Menu Bar.
-3. **Screen-Saver Level Priority**: `win.setAlwaysOnTop(true, 'screen-saver', 1)` elevates the window to native `NSScreenSaverWindowLevel`, preventing any notifications or background windows from rendering in front of the exam.
-4. **Transition Mutex Lock**: Fullscreen and kiosk transitions use an `isTransitioningFullscreen` mutex guard (1200ms debounce) to prevent concurrent AppKit window mutations that could trigger `NSThemeFrame.m:5523` `SIGABRT` crashes.
-5. **Dual State Validation & Exit Hook**: When the student exits fullscreen/kiosk, `handleFullscreenExited()` fires, triggering an immediate desktop snapshot and locking the exam HUD until restored.
+2. **Native Kiosk Mode**: Electron's `win.setKiosk(true)` engages macOS system presentation options (`NSApplicationPresentationDisableProcessSwitching`). This programmatically suppresses the Dock and the Menu Bar.
+3. **Workspace Pinning & Lion Spaces Bypass**: On macOS, calling `setFullScreen(true)` creates an isolated virtual desktop Space that slides away upon app-switching. Proctorly bypasses Lion Fullscreen on macOS, keeping the window on the active workspace and calling `win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })` so the window cannot be swiped away.
+4. **Screen-Saver Level Priority**: `win.setAlwaysOnTop(true, 'screen-saver', 1)` elevates the window to native `NSScreenSaverWindowLevel`, preventing any notifications or background windows from rendering in front of the exam.
+5. **Forceful Focus Stealing (`steal: true`)**: When focus is lost or a blocked shortcut is pressed, `reclaimFocus()` calls `electron.app.focus({ steal: true })`. Unlike standard `win.focus()`, this sends `[NSApp activateIgnoringOtherApps:YES]`, forcefully bringing Proctorly back to the foreground even if the OS initiated an application switch.
+6. **Synchronous Immediate Focus Reclaim**: `handleFocusLost()` immediately reclaims focus before executing asynchronous screenshot captures, eliminating any window of opportunity for candidates to view background content.
 
 #### 📍 Exact Location
-- **Display Check**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L87-L95)
-- **Kiosk Entry / Exit**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L102-L148) (`enterExamFullscreen()`, `exitExamFullscreen()`)
-- **Fullscreen Event Handler**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L644-L675) (`handleFullscreenExited()`)
-- **IPC Invocations**: [`app/app.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/app.js#L213-L245)
+- **Display Check**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L46-L59)
+- **Kiosk Entry / Exit**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L71-L103) (`enterExamFullscreen()`, `exitExamFullscreen()`)
+- **Focus Reclaim**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L104-L115) (`reclaimFocus()`)
+- **Focus Lost Handler**: [`app/proctoringController.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/proctoringController.js#L455-L468) (`handleFocusLost()`)
+- **IPC Invocations**: [`app/app.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/app.js#L215-L255)
 
 #### 💻 Code Snippet
 ```javascript
 // app/proctoringController.js
 enterExamFullscreen() {
     if (!this.window || this.window.isDestroyed()) return;
-    if (this.window.isKiosk() && this.window.isFullScreen()) return;
-    if (this.isTransitioningFullscreen) return;
-
-    this.isTransitioningFullscreen = true;
     try {
         this.window.setFullScreenable(true);
+        if (process.platform === 'darwin') {
+            this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+        }
         this.window.setAlwaysOnTop(true, 'screen-saver', 1);
-        this.window.setKiosk(true);
+        if (!this.window.isKiosk()) this.window.setKiosk(true);
+        if (process.platform !== 'darwin' && !this.window.isFullScreen()) this.window.setFullScreen(true);
+        this.window.moveTop();
+        if (electron.app?.focus) electron.app.focus({ steal: true });
         this.window.focus();
     } catch (err) {
-        console.warn('Failed to enter kiosk mode:', err);
-    } finally {
-        setTimeout(() => {
-            this.isTransitioningFullscreen = false;
-        }, 1200);
+        console.warn('Failed to enter kiosk mode:', err.message);
     }
+}
+
+reclaimFocus() {
+    if (!this.window || this.window.isDestroyed()) return;
+    try {
+        if (process.platform === 'darwin') {
+            this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+        }
+        this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+        this.window.moveTop();
+        if (electron.app?.focus) electron.app.focus({ steal: true });
+        this.window.focus();
+    } catch {}
 }
 ```
 
@@ -251,12 +264,13 @@ enterExamFullscreen() {
 ### Feature 3: Window Focus / Blur Tracking & Clipboard Eraser
 
 #### 🎯 Problem & Threat Model
-A student may use Alt+Tab or mouse clicks to switch to an application behind the exam window or attempt to copy content from the exam or paste external answers.
+A student may use Alt+Tab, Cmd+Tab, or mouse clicks to switch to an application behind the exam window or attempt to copy content from the exam or paste external answers.
 
 #### 💡 Architectural Solution
 1. **Blur Detection**: Native window `blur` listener detects when the Electron window loses OS focus.
-2. **Immediate Evidence Capture**: Triggers `captureImmediate('WINDOW_BLUR')` to capture whatever window the user switched to.
-3. **Clipboard Eradication**: A 2-second interval in `app.js` runs `clipboard.clear()`, wiping the candidate's clipboard buffer continuously during `EXAM_STATES.ACTIVE`.
+2. **Synchronous Focus Reclaim**: Directly invokes `reclaimFocus()` to force OS focus back to the exam window.
+3. **Immediate Evidence Capture**: Triggers `captureImmediate('WINDOW_FOCUS_LOST')` to capture whatever window the user attempted to switch to.
+4. **Clipboard Eradication**: A 2-second interval in `app.js` runs `clipboard.clear()`, wiping the candidate's clipboard buffer continuously during `EXAM_STATES.ACTIVE`.
 
 #### 📍 Exact Location
 - **Window Hook**: [`app/app.js`](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/app.js#L104-L111) & [Lines 130-138](file:///Users/patlorinipun/Desktop/Semester_5/AD/Proctorly/app/app.js#L130-L138)
