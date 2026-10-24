@@ -2,6 +2,8 @@
 
 Raw sequential prompt history logged during the implementation of the Proctorly desktop proctoring system. Built alongside Application Development lectures — concepts covered in class, AI used primarily for debugging and fixing errors during implementation.
 
+> Historical discussion is not a specification of the current code. The November 25 readability update and current feature matrix below supersede older claims about outboxes, mutexes, crash reloads, strict modifier equality and server deadlines. See [System Documentation](../SYSTEM_DOCUMENTATION.md) for the current implementation.
+
 ---
 
 ## Phase 1: Project Setup & Electron Scaffold
@@ -395,27 +397,39 @@ Raw sequential prompt history logged during the implementation of the Proctorly 
 
 ---
 
-## Feature Matrix
+## Phase 13: Readability cleanup — November 25, 2026
+
+### 31. Shorter controller, extracted frontend and current docs
+
+#### Developer request
+> "can you decrease more lines of code in proctorlng controller and add some human readable comments and make the code readable and debuggable and update all the related docs?"
+
+#### Implementation
+- Kept all controller functionality in `app/proctoringController.js`, with named in-file helpers for requests, timers, window operations, evidence writes, violations and JSONL logs.
+- Added comments describing callback ordering, wall-clock timing, paired image timestamps and intentionally best-effort failure handling.
+- Replaced the large `App.jsx` body with a screen selector; preserved shared state through session/camera/background-app/proctoring hooks and moved fullscreen/session request helpers into proper folders.
+- Left backend runtime, main/preload integration, quiz, CSS, policies and dependencies unchanged.
+- Updated README startup/build commands, architecture/debugging references, backend scoring/storage examples and historical audit/interview notes.
+- Mocked controller and backend checks pass. Full build/lint failed on timed-out installed dependency reads; real camera/fullscreen/OS checks remain manual.
+
+## Current Feature Matrix
 
 | Feature | File | Key Function | Mechanism |
 | :--- | :--- | :--- | :--- |
-| **Kiosk Lockdown** | `proctoringController.js · kiosk` | `enter()` / `exit()` | `setKiosk`, screen-saver level, workspace pin |
-| **Kiosk Watchdog** | `proctoringController.js · controller` | `watchdogTick()` | 1s interval, re-engage kiosk + reclaim focus |
-| **Multi-Display Guard** | `proctoringController.js · controller` | `checkDisplays()` | `screen.getAllDisplays()` + `display-added` event |
-| **Shortcut Blocker** | `proctoringController.js · input policy` | `isBlockedInput()` | Strict modifier matching, `before-input-event` |
-| **Global Shortcut Trap** | `proctoringController.js · controller` | `registerGlobalShortcuts()` | `globalShortcut.register` for system-level shortcuts |
-| **Keystroke Telemetry** | `proctoringController.js · telemetry` | `recordKey()` / `flushKeylogs()` | Buffered batches via outbox |
-| **Desktop Capture** | `proctoringController.js · evidence` | `captureDesktop()` | `desktopCapturer` → JPEG |
-| **Webcam Snapshot** | `proctoringController.js · evidence` | `saveFaceSnapshot()` | IPC request → canvas → ArrayBuffer → validate → write |
-| **Process Scanner** | `proctoringController.js · scanner` | `findBlockedApps()` | `ps -axo comm=` + exact name match |
-| **Reliable Outbox** | `proctoringController.js · outbox` | `enqueue()` / `drain()` | Backoff retry + dead-letter file |
-| **Authoritative Timer** | `proctoringController.js · controller` | `startClockTimer()` | `deadline - Date.now()` per tick |
-| **Auto-Expiry** | `proctoringController.js · controller` | `handleExamExpired()` | Single-flight, backend-first, then renderer notify |
-| **Crash Recovery** | `proctoringController.js · controller` | `handleRendererGone()` | Sliding window crash count, reload or abort |
+| **Kiosk Lockdown** | `app/proctoringController.js` | `enterExamFullscreen()` / `exitExamFullscreen()` | Kiosk, screen-saver priority, workspace pinning |
+| **Kiosk Watchdog** | `app/proctoringController.js` | `startKioskEnforcement()` | 1s interval; reclaims focus/priority, does not re-enable kiosk |
+| **Multi-Display Guard** | `app/proctoringController.js` | `checkDisplays()` / `initDisplayMonitoring()` | Flags multiple/added displays |
+| **Shortcut Blocker** | `app/proctoringController.js` | `isBlockedInput()` | Key sets and explicit modifier rules |
+| **Global Shortcut Trap** | `app/proctoringController.js` | `registerGlobalShortcuts()` | Best-effort OS registration |
+| **Keystroke Telemetry** | `app/proctoringController.js` | `recordKeylog()` / `flushKeylogs()` | 250ms normal batch, immediate suspicious-key flush |
+| **Desktop Capture** | `app/proctoringController.js` | `captureDesktop()` / `saveCapture()` | Desktop thumbnail → PNG, window fallback |
+| **Webcam Snapshot** | `src/hooks/useCamera.js`, controller | `storeFaceFrame()` / `saveFaceSnapshot()` | Canvas → JPEG ArrayBuffer → local write |
+| **Process Scanner** | `app/proctoringController.js` | `getRunningProcesses()` | Platform-specific enumeration + substring matching |
+| **Main Clock** | `app/proctoringController.js` | `startClockTimer()` | Elapsed wall time from timer start |
+| **Auto-Expiry** | `app/proctoringController.js` | `handleExamExpired()` | Notify UI, await backend, stop local session |
+| **Renderer Gone** | `app/app.js` | `render-process-gone` handler | Stops recurring monitors; no automatic reload |
 | **Secure IPC Bridge** | `preload.js` | `contextBridge.exposeInMainWorld()` | Named API only, no raw Node in renderer |
-| **IPC Sender Validation** | `app.js` | `handle()` | Frame URL checked on every IPC call |
-| **Atomic Session Store** | `backend/server.js` | `writeAtomic()` | Temp file + `fs.rename()` |
-| **Deadline Enforcement** | `backend/server.js` | `closeIfOverdue()` | Server rejects late answers independently |
-| **Idempotent Grading** | `backend/server.js` | `finalizeSession()` | Closed sessions never change again |
-| **Exam HUD** | `src/App.jsx` | `App()` | Setup checks, start flow, IPC event wiring |
+| **Session Store** | `backend/server.js` | `saveSessions()` | Temp write + rename; direct-write fallback |
+| **Grading** | `backend/server.js` | Submit/expire route handlers | Finalization-only scoring; permits re-finalization |
+| **Exam UI** | `src/screens`, `src/hooks` | Screen components and `useExamSession()` | UI, shared session state and effects |
 | **Quiz & Lock Overlay** | `src/components/Quiz/Quiz.jsx` | `submitExam()` | Answer saving, confirm dialog, lock modal |

@@ -11,17 +11,18 @@ Proctorly delivers a secure, fully monitored testing environment for candidates 
 ### 🔒 Anti-Cheat & OS-Level Lockdown
 - **Native Kiosk Mode**: Enforces `NSApplicationPresentationDisableProcessSwitching` on macOS, disabling Mission Control gestures, Spaces swiping, the Dock, and the Menu Bar.
 - **Screen-Saver Level Window Priority**: Elevates the exam window to `NSScreenSaverWindowLevel` so no background app or floating notification can appear over the exam.
-- **Multi-Display Detection**: Automatically disallows multiple monitors or sidecar displays during an active session.
+- **Multi-Display Detection**: Flags multiple displays at session start and newly connected displays during an active exam.
 - **Cmd+Tab / Alt+Tab Interception**: Proactively blocks application-switching shortcuts and reclaims focus via `app.focus({ steal: true })` on every window blur event.
 - **Workspace Pinning**: Pins the window across all desktop spaces while bypassing Lion Fullscreen isolation to prevent space-sliding.
 - **Blur Event Surveillance**: Captures desktop evidence immediately upon any focus-loss event.
 
 ### 🕵️ Background Process Detection
-Detects and flags unauthorized background processes including Zoom, Discord, OBS, TeamViewer, AnyDesk, Slack, Skype, and more.
+Checks running applications before the exam, including Zoom, Discord, OBS, TeamViewer, AnyDesk, Slack, Skype, and more. The blocked-app screen provides a manual recheck after closing them.
 
 ### 📸 Synchronized Surveillance Snapshots
 - Periodic desktop screenshots via Electron's `desktopCapturer`.
-- Periodic candidate webcam snapshots synchronized by session timestamp.
+- Periodic candidate webcam snapshots paired with desktop images by filename timestamp.
+- Initial capture after 3 seconds; recurring captures at 10, 20, 30 seconds, and so on.
 
 ### ⌨️ Keystroke & Shortcut Guard
 Low-level blocking and logging of forbidden key combinations — Copy, Paste, Print Screen, DevTools Inspect, Alt+Tab, Cmd+Tab, Spotlight, and Mission Control — with strict modifier matching to eliminate false positives during normal typing.
@@ -30,13 +31,13 @@ Low-level blocking and logging of forbidden key combinations — Copy, Paste, Pr
 Custom Proctorly icon (`.icns` multi-scale Retina bundle) embedded into the macOS `.app` bundle, `.dmg` installer volume, and the web interface.
 
 ### ⏱️ Session Lifecycle & Authoritative Clock
-- Countdown timer managed exclusively by the main process with automatic submission on expiration.
+- In Electron, the main process manages the countdown and calls the backend expiration endpoint. Browser-only preview uses a limited React countdown without native monitoring.
 - Fault-tolerant stream protection suppressing broken-pipe errors (`EIO` / `EPIPE`) with safe IPC dispatching.
 
 ### 🖥️ Examination HUD & Recovery UI
 - Real-time webcam preview with live status badges.
 - Self-healing **"Re-enter Fullscreen & Unlock Exam"** action for accidental focus loss recovery.
-- Interactive MCQ navigation with instant score evaluation.
+- Interactive MCQ navigation; answers are evaluated only on submission or expiration.
 
 ---
 
@@ -46,50 +47,100 @@ Custom Proctorly icon (`.icns` multi-scale Retina bundle) embedded into the macO
 |---|---|
 | Frontend | React 19, Vite, Tailwind CSS, Lucide React |
 | Desktop Wrapper | Electron (secure IPC, `contextBridge`, native Kiosk APIs, `desktopCapturer`) |
-| Backend | Express.js (session management, telemetry, media uploads) |
+| Backend | Express.js (session management, scoring, telemetry and capture metadata) |
 
 ---
 
-## 📦 Setup & Installation
+## 📦 Local Setup & Installation
 
 ### Prerequisites
 
-- **Node.js** v18+ and **npm** v9+
-- **macOS** Ventura or later (required for native kiosk APIs and `.dmg` packaging)
-- A connected webcam for candidate surveillance
+- **Node.js** `22.12+` and **npm** (required by Vite 8)
+- **macOS** Ventura (`13.0`) or later (required for native kiosk APIs, screen capture, and `.dmg` packaging)
+- A working **webcam** for candidate surveillance
+
+Verify your Node.js version before starting:
+
+```bash
+node -v
+```
 
 ---
 
 ### Step 1 — Clone the Repository
 
 ```bash
-git clone https://github.com/your-username/Proctorly.git
+git clone https://github.com/nipun1803/Proctorly.git
 cd Proctorly
 ```
 
 ### Step 2 — Install Dependencies
 
+Install both the root (React + Electron) and backend (Express) dependencies:
+
 ```bash
 # Root dependencies (Frontend + Electron)
 npm install
 
-# Backend dependencies
-cd backend && npm install && cd ..
+# Backend dependencies (Express API)
+npm --prefix backend install
 ```
 
-### Step 3 — Run in Development Mode
+### Step 3 — Grant macOS Permissions (First-Time Local Run)
 
-Open **two separate terminals** and run the following:
+When running Proctorly from a terminal in development mode, macOS attributes hardware permissions to your terminal app (e.g., Terminal, iTerm2, or VS Code):
 
-**Terminal 1 — Backend Server:**
-```bash
-cd backend && npm start
-```
+1. Open **System Settings → Privacy & Security**.
+2. Enable **Camera** and **Screen & System Audio Recording** for your terminal app (or Electron when prompted).
+3. Close any prohibited background apps (such as Zoom, Discord, OBS, Slack, Skype, TeamViewer, or AnyDesk) before starting a proctored session, or Proctorly will pause at the pre-exam check screen.
 
-**Terminal 2 — React Dev Server + Electron:**
+### Step 4 — Run Locally
+
+#### Option A — Full Electron Desktop App *(Recommended)*
+
+Open **two separate terminals** from the repository root:
+
+**Terminal 1 — Start the React/Vite dev server (`http://localhost:5173`):**
 ```bash
 npm run dev
 ```
+
+**Terminal 2 — Start Electron:**
+```bash
+npm start
+```
+
+> **How it works:** Wait until Vite reports `http://localhost:5173` is ready before running `npm start`. Electron automatically checks port `3000` and forks `backend/server.js` if the backend is not already running. If Vite is not running on port `5173`, Electron falls back to `dist/index.html`.
+
+#### Option B — Browser-Only UI Preview
+
+If you only want to inspect the React UI in a browser without native kiosk lockdown:
+
+```bash
+# Terminal 1 — Start the Express backend on http://localhost:3000
+npm --prefix backend start
+
+# Terminal 2 — Start the Vite frontend on http://localhost:5173
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser. Note that browser-only mode **cannot** enforce OS shortcut blocking, scan background processes, or capture desktop screenshots.
+
+### Step 5 — Local Data & Quick Verification
+
+- **Local session data:** During development, exam sessions, flags, keylogs, and captured screenshots/webcam shots are stored under `backend/data/sessions.json` and `backend/data/sessions/<sessionId>/`.
+- **Verify everything works:** Run the automated test suite and syntax checks from the repository root:
+
+```bash
+node --test tests/*.test.cjs
+node --check app/proctoringController.js
+```
+
+### Troubleshooting Local Setup
+
+- **Blank window or stale UI in Electron:** Make sure `npm run dev` is running on port `5173` before launching `npm start`, or run `npm run vite:build` to refresh `dist/index.html`.
+- **Port `3000` or `5173` already in use:** Stop the existing process (`lsof -ti:3000 | xargs kill` or `lsof -ti:5173 | xargs kill`) and restart.
+- **Camera or desktop capture fails:** Check **System Settings → Privacy & Security** for **Camera** and **Screen & System Audio Recording** permissions, then restart your terminal/Electron.
 
 ---
 
@@ -98,16 +149,16 @@ npm run dev
 ### Build the React Frontend
 
 ```bash
-npm run build
+npm run vite:build
 ```
 
 ### Package & Generate the macOS `.dmg` Installer
 
 ```bash
 # Using the configured npm script
-npm run dist
+npm run build
 
-# Or invoke electron-builder directly
+# Or package an already-built frontend directly
 npx electron-builder --mac dmg
 ```
 
@@ -214,7 +265,7 @@ Proctorly/
 ├── app/
 │   ├── app.js                    # Electron main process & window management
 │   ├── preload.js                # Context bridge — secure Proctorly proctoring API
-│   └── proctoringController.js   # Proctoring engine (detections, captures, timers)
+│   └── proctoringController.js   # Single-file engine with shared in-file helpers
 ├── backend/
 │   ├── data/
 │   │   └── questions.json        # Assessment question dataset
@@ -224,16 +275,37 @@ Proctorly/
 │   ├── icon.icns                 # Multi-scale Retina macOS icon bundle
 │   └── icon.png                  # High-resolution PNG app icon
 ├── docs/
-│   └── SYSTEM_DOCUMENTATION.md  # HLD diagrams and function reference matrix
+│   ├── SYSTEM_DOCUMENTATION.md   # Architecture, function map and debugging guide
+│   └── UNUSED_CODE_AUDIT.md      # Current cleanup notes and historical audit
 ├── release/                      # Packaged DMG installer output
 ├── src/
 │   ├── components/               # Quiz and UI components
-│   ├── App.jsx                   # Main candidate examination dashboard
+│   ├── hooks/                    # Session, camera, apps and proctoring effects
+│   ├── screens/                  # Setup, blocked apps, exam and results UI
+│   ├── services/examApi.js       # Session-start and session-fetch requests
+│   ├── utils/fullscreen.js       # Electron/browser fullscreen helpers
+│   ├── App.jsx                   # Small screen selector (original priority retained)
 │   ├── index.css                 # Tailwind design system tokens
 │   └── main.jsx                  # React entry point
 ├── public/                       # Static assets and icons
+├── tests/                        # Mocked controller and backend regression checks
 └── vite.config.js                # Vite build configuration
 ```
+
+---
+
+## Validation & Debugging
+
+```bash
+node --test tests/*.test.cjs
+node --check app/proctoringController.js
+npm run vite:build
+npx eslint src/App.jsx src/hooks src/screens src/services src/utils app/proctoringController.js
+```
+
+Controller/frontend tests compare against pre-cleanup commit `4eff01d`; retain that Git history to run them. Controller tests mock Electron, timers, network and disk writes. Frontend checks cover JSX structure, screen priority, syntax and start/reset/recovery actions using the existing parser packages. Backend tests exercise real route handlers with mocked routing and temporary storage, not a live HTTP server. No test opens kiosk mode or touches candidate evidence.
+
+See the [debugging and manual-check guide](docs/SYSTEM_DOCUMENTATION.md#debugging-and-validation) for camera, screen-recording, focus recovery and shortcut checks. Mocked tests do not replace hardware/OS verification.
 
 ---
 
