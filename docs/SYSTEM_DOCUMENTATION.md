@@ -354,7 +354,7 @@ Every controller method and helper stays in [`app/proctoringController.js`](../a
 | Area | Methods / constants |
 |---|---|
 | Session state | `EXAM_STATES`, `getState()`, `getSession()`, `setCurrentQuestionId()`, `startSession()`, `stopSession()` |
-| Safe window operations | `hasWindow()`, `safeSend()`, `pinWindow()`, `focusWindow()` |
+| Safe window operations | `setWindow()`, `hasWindow()`, `safeSend()`, `pinWindow()`, `focusWindow()` |
 | Lockdown | `enterExamFullscreen()`, `exitExamFullscreen()`, `reclaimFocus()` |
 | Display checks | `checkDisplays()`, `initDisplayMonitoring()` |
 | Processes | `BLOCKED_APPS`, `getRunningProcesses()` |
@@ -477,9 +477,34 @@ append event -> post flag (not awaited) -> await immediate screenshot
 
 The fullscreen-exit handler ignores events while the window still reports kiosk or fullscreen mode. Restored handlers append restoration events and notify the renderer. The UI controls quiz locking and recovery.
 
+| Observation | Controller action | Renderer effect |
+|---|---|---|
+| Focus lost while active | Optional proctored focus reclaim; event/flag, immediate desktop capture and key flush | Focus notice and exam lock after the notification |
+| Focus restored while active | Restoration event and notification | Clears focus notice; unlock depends on the listener's captured fullscreen state |
+| Genuine fullscreen exit while active | Event/flag, immediate desktop capture and key flush | Fullscreen notice, inactive fullscreen status and exam lock |
+| Fullscreen restored while active | Restoration event and notification | Clears fullscreen violation and unlocks the quiz |
+| Global/renderer shortcut blocked | Prevent/intercept action, event/flag, focus reclaim and notice; input path also flushes keys | Temporary blocked-shortcut toast |
+| Multiple displays at start | Backend flag | No start rejection |
+| Display added while active | Flag, immediate desktop capture, count event and focus reclaim | No dedicated frontend display-count listener in the current preload/hook |
+
+Immediate incident capture is **desktop-only**; it does not automatically request a paired webcam frame. A flag or overlay message does not guarantee that a capture was successfully written.
+
 ### Keyboard and process checks
 
 `isBlockedInput()` checks explicit key sets and modifier rules: Cmd/Ctrl combinations, Cmd/Ctrl+Shift inspection keys, Cmd/Ctrl+Alt+Escape, Alt+Tab/F4, and unmodified system keys. It does **not** perform exact modifier equality for every rule. Global shortcut registration is best-effort because some combinations are reserved by the OS. Cmd/Ctrl+Q remains handled by `app/app.js` for quit confirmation.
+
+| Input rule | Keys / combinations |
+|---|---|
+| Cmd or Ctrl held | `C`, `V`, `X`, `A`, `P`, `S`, `F`, `U`, `R`, `H`, `W`, `M`, `Tab`, space, plus system-key set below |
+| Cmd/Ctrl + Shift | `R`, `I`, `J`, `C` |
+| Cmd/Ctrl + Alt | `Escape` |
+| Alt held | `Tab`, `F4` |
+| System-key set with Cmd/Ctrl | `PrintScreen`, `F3`, `F4`, `F11`, `F12`, all four arrow keys |
+| No Cmd/Ctrl, Alt or Shift | `PrintScreen`, `F3`, `F4`, `F11`, `F12` |
+
+Global accelerators separately include Cmd/Ctrl+Space/H/M/Alt+Escape/W/Tab, Alt+Tab/Escape, Ctrl+arrows and F3/F4/F11/F12. They are registered through Electron's `globalShortcut` API; the registered set and the `before-input-event` predicate are separate protection layers, not identical policies.
+
+The main window always suppresses its native context menu. During `ACTIVE`, renderer DOM handlers also prevent copy/paste/cut/drag/drop except on input/textarea targets, and prevent context menus. Those DOM exceptions do not override native keyboard blocking in Electron.
 
 Process enumeration uses:
 
@@ -488,6 +513,8 @@ Process enumeration uses:
 - Linux: `ps -eo comm --no-headers | sort -u`.
 
 Names are deduplicated, known app/IDE names are ignored, and blocked names use case-insensitive substring matching. Command failure returns empty lists. The frontend checks on initial load and manual recheck; there is no periodic process scanner.
+
+The current `BLOCKED_APPS` list is: `zoom`, `teamviewer`, `discord`, `slack`, `skype`, `telegram`, `anydesk`, `chrome remote desktop`, `vnc`, `screenshare`, `obs`, `obs studio`, `streamlabs`, `bandicam`, `camtasia`, `whatsapp`, `messenger`, `signal` and `line`. Ignored exact names are Electron, Athena, Proctorly, Antigravity IDE and System Events. Substring matching can produce false positives and process names can vary; do not treat this list as a comprehensive application detector.
 
 ## Capture and evidence storage
 
@@ -509,7 +536,7 @@ sequenceDiagram
     M->>B: POST /exam/capture (camera metadata, best-effort)
 ```
 
-Desktop capture precedes the webcam request; the files share a timestamp, but are not physically captured at exactly the same instant. Thumbnails are capped at 1920×1080 using the primary display's size and scale. If screen capture throws or yields no bytes, the controller tries `webContents.capturePage()`; if there is no primary display, the existing early return skips that fallback.
+Desktop capture precedes the webcam request; the files share a timestamp, but are not physically captured at exactly the same instant. Thumbnails are capped at 1920×1080 using the primary display's size and scale. The controller selects the first returned screen source, or the first available source; it does not collect every connected display or explicitly match the primary display's ID. If screen capture throws or yields no bytes, it tries `webContents.capturePage()`; if there is no primary display, the existing early return skips that fallback. A window fallback is not equivalent to evidence of the whole desktop.
 
 `saveCapture()` writes bytes **before** posting metadata. Desktop filenames end in `.png`, webcam filenames in `.jpg`. The backend does not receive image bytes or serve a capture directory.
 
@@ -526,6 +553,70 @@ Packaged:    <Electron userData>/data/
 ```
 
 Capture metadata keeps the original project-relative `path` calculation, including packaged paths that may contain parent-directory segments. Do not change this contract while doing a readability-only cleanup.
+
+### Files, ownership and formats
+
+| File / collection | Writer | Contents |
+|---|---|---|
+| `questions.json` | Repository-maintained dataset | Question IDs, text, options and zero-based answer keys |
+| `sessions.json` | Backend | Array of sessions containing answers, final scores, flags, keylogs and capture metadata |
+| `screenshots/*.png` | Controller | Native desktop/window capture bytes |
+| `camerashots/*.jpg` | Controller, from renderer frames | Webcam still images; canvas JPEG quality is `0.85` |
+| `events.jsonl` | Controller | One activity/lifecycle event per line, with timestamp, question ID and metadata |
+| `keylogs.jsonl` | Controller | Append-only local key records flushed from memory |
+| `keylogs.json` | Backend | Separate JSON-array copy of received key batches |
+
+The renderer requests webcam video with ideal 640×480 dimensions and `audio: false`. A live stream is used for preview/frame extraction, but no continuous video/audio recording is persisted. `onended` clears camera-ready state and sends `CAMERA_DISCONNECTED` through IPC when a session ID exists. There is no automatic reconnect workflow or immediate disconnect screenshot in that handler.
+
+### Session data model
+
+A newly created backend record has this structure. Arrays grow during the attempt; score fields remain at their initial values until finalization.
+
+```json
+{
+  "sessionId": "session-example",
+  "userId": "student-demo",
+  "name": "Demo Candidate",
+  "mode": "PROCTORED",
+  "durationSec": 1800,
+  "startedAt": "2026-11-25T10:45:00.000Z",
+  "submittedAt": null,
+  "status": "in-progress",
+  "attempted": 0,
+  "correct": 0,
+  "wrong": 0,
+  "answers": [],
+  "flags": [],
+  "keylogs": [],
+  "screenshots": [],
+  "cameraShots": []
+}
+```
+
+Real session IDs are generated as `session-${Date.now()}`. The controller instead stores `studentId`, `studentName`, uppercase status and an `expiresAt` value in its local object. Backend records use `userId`/`name` and do not contain an independently enforced deadline.
+
+A saved answer contains `questionId`, numeric `selectedAnswer` and `answeredAt`; grading adds `isCorrect`. A flag contains `sessionId`, `type`, `details`, `questionId` and `timestamp`.
+
+Desktop capture metadata sent to the backend looks like this:
+
+```json
+{
+  "sessionId": "session-example",
+  "type": "screen",
+  "filename": "2026-11-25T10-45-03-000Z.png",
+  "timestamp": "2026-11-25T10-45-03-000Z",
+  "questionId": 1,
+  "path": "backend/data/sessions/session-example/screenshots/2026-11-25T10-45-03-000Z.png"
+}
+```
+
+Capture filename timestamps replace `:` and `.` with `-` for filesystem-safe names. Event/key timestamps use ordinary ISO strings. Pair screen/camera records using their shared capture timestamp, and correlate other observations with the session/question ID and nearby event times. Question attribution is read from the current controller value, so asynchronous capture work can span question navigation.
+
+### Persistence and failure boundaries
+
+`saveSessions()` reads/writes the session index as a whole, using a temporary write/rename with a direct-write fallback. There is no database transaction spanning that index, image files and the two keylog formats. Read/parse failures return an empty session list; a later save can overwrite the previous index. Preserve a copy of suspect files before recovery or experiments.
+
+Image bytes are written before metadata is posted. Therefore an image can exist without a backend record if a request fails, and a metadata record alone cannot prove the image remains available. JSONL appends and most telemetry uploads are best-effort. There is no retry outbox, file-integrity signature, encryption-at-rest layer or guaranteed evidence synchronization.
 
 ## Timers and keystrokes
 
@@ -544,6 +635,29 @@ Capture metadata keeps the original project-relative `path` calculation, includi
 
 `recordKeylog()` uses an array buffer, not a ring buffer or worker thread. Key records preserve session ID, ISO timestamp, question ID, event type, combination, modifiers and blocked status. `flushKeylogs()` clears its timeout, copies/empties the buffer, synchronously appends JSONL, then posts `/exam/keylog`. Backend session and `keylogs.json` updates are separate writes.
 
+The main clock measures elapsed time from the start of `startClockTimer()`, rather than counting received ticks or using the backend `startedAt`. This avoids delayed-callback drift, but uses the system wall clock and has no server-side deadline enforcement. The browser fallback instead decrements a counter each second and can drift when callbacks are throttled.
+
+The initial 3-second capture timeout is not retained in a handle or cancelled by `stopCaptureScheduler()`. It checks only the current active state; a quick stop/start can let an older timeout run in a newer session. Recurring capture callbacks are not serialized with a single-flight guard.
+
+### Key record and ingestion paths
+
+```json
+{
+  "sessionId": "session-example",
+  "timestamp": "2026-11-25T10:45:04.000Z",
+  "questionId": 1,
+  "eventType": "KEY_DOWN",
+  "key": "c",
+  "combination": "Ctrl+c",
+  "modifiers": { "meta": false, "ctrl": true, "alt": false, "shift": false },
+  "isBlocked": true
+}
+```
+
+The native input handler records `keyDown` events. `recordKeylog()` can format `KEY_UP`, but the current native handler does not call it for ordinary key-up events. Any blocked key or key with Cmd/Ctrl/Alt flushes immediately; Shift-only ordinary input uses the normal 250 ms batch.
+
+The renderer also forwards DOM keydown events through `logKey`. There is no deduplication between native and renderer paths. Electron input uses `control`, while that DOM payload uses `ctrl`; the controller reads `control`. As a result, entries from these paths need not have identical Ctrl modifier/blocked values. Do not interpret record count as unique physical keystrokes.
+
 ## IPC and backend contracts
 
 [`app/preload.js`](../app/preload.js) remains the source of truth for invokers and unsubscribe-returning listeners. Main-to-renderer channels include `timer-tick`, `request-face-snapshot`, `blocked-keybinding`, focus/fullscreen events, `exam-expired`, `exam-state-changed`, and `external-display-detected`.
@@ -558,6 +672,129 @@ Controller HTTP posts keep their original bodies:
 The backend serves five questions without answer keys; `/exam/answer` returns only message and attempted count. Submit/expire evaluates correctness and returns attempted, correct, wrong, total and percentage. See [`backend/README.md`](../backend/README.md) for endpoints and examples.
 
 `saveSessions()` tries temp-file write plus rename, then falls back to direct writing. Read/parse failures return an empty session list. This is best-effort local persistence, not ACID storage or guaranteed crash recovery.
+
+### Renderer-to-main methods
+
+All methods below are exposed on both bridge names and use `ipcRenderer.invoke()`, returning a promise. Handlers live in [`app/app.js`](../app/app.js).
+
+| Preload method | IPC channel | Input / result |
+|---|---|---|
+| `startExamSession(params)` | `start-exam-session` | Local session ID, candidate details, mode/duration; returns controller session metadata |
+| `stopExamSession(endState, reason)` | `stop-exam-session` | Local final state/reason; returns `{ success: true }`, not backend grading |
+| `getExamState()` | `get-exam-state` | Returns controller state string |
+| `setCurrentQuestion(questionId)` | `set-current-question` | Updates positive numeric evidence-attribution ID |
+| `enterFullscreen()` | `enter-fullscreen` | Requests kiosk/fullscreen entry; returns boolean |
+| `exitFullscreen()` | `exit-fullscreen` | Requests kiosk/fullscreen release; returns boolean |
+| `isFullscreen()` | `is-fullscreen` | Returns native fullscreen **or** kiosk status |
+| `storeFaceSnapshot(data, timestamp)` | `store-face-snapshot` | JPEG `ArrayBuffer` and pairing timestamp; returns saved path when successful |
+| `captureDesktopImmediate(reason)` | `capture-desktop-immediate` | Requests incident desktop capture |
+| `getBackgroundApps()` | `get-background-apps` | Returns `{ allApps, blockedApps }` |
+| `checkDisplays()` | `check-displays` | Returns `{ count, isMultiDisplay, displays }` |
+| `flagActivity(type, details, questionId)` | `flag-activity` | Writes local event and posts backend flag |
+| `logMediaStatus(type, details, questionId)` | `log-media-status` | Same logging/flagging pattern for media events |
+| `logKey(data)` | `log-key` | Passes input data to `recordKeylog()` |
+
+Boolean fullscreen responses indicate the current handler's result, not independent verification that every native call succeeded: the controller internally catches some window failures. `stopExamSession` likewise acknowledges the handler, even if no active session needed stopping.
+
+### Main-to-renderer listeners
+
+Each preload subscription returns a function that removes its listener. Call that function on effect cleanup to avoid accumulating handlers.
+
+| Preload listener | Event channel | Payload / purpose | Used by current hook? |
+|---|---|---|---|
+| `onTimerTick(callback)` | `timer-tick` | `{ elapsed, remaining }` in seconds | Yes |
+| `onRequestFaceSnapshot(callback)` | `request-face-snapshot` | `{ timestamp }` for the paired webcam frame | Yes |
+| `onExamExpired(callback)` | `exam-expired` | No payload; triggers expiry UI/session fetch | Yes |
+| `onExamStateChanged(callback)` | `exam-state-changed` | `{ state, sessionId }` after local stop | No |
+| `onBlockedKeybinding(callback)` | `blocked-keybinding` | Key/shortcut and timestamp; input path also includes modifier flags | Yes |
+| `onFullscreenExited(callback)` | `fullscreen-exited` | No payload; lock notice | Yes |
+| `onFullscreenRestored(callback)` | `fullscreen-restored` | No payload; recovery notice | Yes |
+| `onWindowFocusLost(callback)` | `window-focus-lost` | No payload; focus lock | Yes |
+| `onWindowFocusRestored(callback)` | `window-focus-restored` | No payload; focus recovery | Yes |
+
+The controller additionally sends `external-display-detected` with `{ count }`, but no matching subscription method is currently exposed by preload. Display flags/capture still run; there is no implemented display-count UI listener to document as an active feature.
+
+### HTTP endpoint reference
+
+Base URL: `http://localhost:3000`. Requests with bodies use JSON and `Content-Type: application/json`. Express accepts JSON bodies up to `10mb`. The following table covers all currently registered routes; fuller request examples are in [`backend/README.md`](../backend/README.md).
+
+| Method | Route | Required input | Success behavior |
+|---|---|---|---|
+| GET | `/` | None | Backend-running message |
+| POST | `/exam/start` | `userId`, `name`; optional `mode`, `durationSec` | `201`, session ID; creates index entry/directories |
+| GET | `/exam/mcq` | None | First five question objects without answer keys |
+| GET | `/exam/mcq/:id` | Question ID in route | One sanitized question from the capped dataset |
+| POST | `/exam/answer` | `sessionId`, `questionId`, `selectedAnswer` | Saves/updates an answer; message and attempted count only |
+| POST | `/exam/clear-answer` | `sessionId`, `questionId` | Removes saved answer or reports no answer to clear |
+| GET | `/exam/session/:sessionId` | Session ID in route | Full stored session, including telemetry and available scores |
+| POST | `/exam/submit` | `sessionId` | Grades saved answers, sets `submitted`, returns `result` |
+| POST | `/exam/expire` | `sessionId` | Grades saved answers, sets `expired`, returns `result` |
+| POST | `/exam/flag` | `sessionId`, `type` or legacy `flagType` | Adds flag; optional details/question ID/timestamp |
+| GET | `/exam/flags/:sessionId` | Session ID in route | Flag array |
+| POST | `/exam/keylog` | `sessionId`, `keylogs` | Accepts one entry or array; updates index and `keylogs.json` |
+| GET | `/exam/keylogs/:sessionId` | Session ID in route | Keylog array from session index |
+| POST | `/exam/capture` | `sessionId`, `type`, `filename` | Adds metadata; `camera`/`face` normalize to camera, other types to screen |
+| GET | `/exam/captures/:sessionId` | Session ID in route | `{ screenshots, cameraShots }` metadata arrays |
+
+Missing required fields generally produce `400`; unknown session/question lookups produce `404`. Answer saving and clearing reject sessions that are not `in-progress`. Submit/expire do **not** reject already finalized sessions; telemetry routes also do not require an active status. Current validation checks are limited and do not constitute full payload schemas or option-index range validation.
+
+### Example exam requests
+
+Create a session:
+
+```http
+POST /exam/start
+Content-Type: application/json
+
+{"userId":"student-demo","name":"Demo Candidate","mode":"PROCTORED","durationSec":1800}
+```
+
+Use the returned ID in subsequent requests. Saving option B for question 1 uses index `1`:
+
+```http
+POST /exam/answer
+Content-Type: application/json
+
+{"sessionId":"session-example","questionId":1,"selectedAnswer":1}
+```
+
+The first successful save returns `{"message":"Answer saved","attempted":1}` and no correctness. Submitting uses `/exam/submit` with `{"sessionId":"session-example"}`. For the example score described earlier, the response is:
+
+```json
+{
+  "message": "Exam submitted successfully",
+  "result": { "attempted": 4, "correct": 3, "wrong": 1, "total": 5, "percentage": 60 }
+}
+```
+
+There are no API routes for serving the image bytes, listing every session, deleting evidence, authenticating users or aborting a backend attempt. Do not infer such routes from directory names or exported frontend methods.
+
+## Security and privacy
+
+### Implemented boundaries
+
+- Renderer Node integration is disabled and context isolation is enabled. Native operations are exposed through named bridge methods.
+- Popups are denied; navigation is restricted using URL-prefix checks; menus/DevTools and selected input paths are restricted by the window configuration/handlers.
+- Candidate question responses omit `correctAnswer`, and active answer saves do not reveal correctness.
+- OS lockdown, process matching and evidence collection supplement the exam UI; they are not a secure operating-system boundary.
+
+### Boundaries not implemented
+
+The backend has no authentication, authorization or rate limiting, uses permissive CORS and calls `app.listen(PORT)` without an explicit loopback host. Although clients use `localhost`, do not assume the server is bound only to loopback or safe to expose to a network. Full-session/telemetry routes return sensitive data to anyone able to access them with a known ID.
+
+IPC handlers do not comprehensively validate the sender or payloads. Session IDs/timestamps and capture metadata are not cryptographically verified. The local question source contains answer keys, and local files can be read/modified by users with filesystem access. These are significant limitations for a high-stakes production deployment.
+
+### Handling candidate data
+
+Desktop screenshots, camera images, student identifiers and key records can contain sensitive information. The current application has no implemented retention schedule, consent-record workflow, role-based examiner view or evidence-deletion API. The results screen's synchronization message is UI text, not a durable-storage guarantee.
+
+For development and demonstrations:
+
+1. Explain what the app collects and obtain appropriate permission before recording a person or their desktop.
+2. Use fictional identities, close unrelated private windows and verify the actual evidence directory.
+3. Restrict filesystem/network access and avoid uploading candidate evidence to Git or sharing raw logs unnecessarily.
+4. Agree on retention/deletion outside the app; preserve files needed for debugging before making targeted changes.
+5. Inspect packaging output for local records, even when those records are ignored by Git.
 
 ## Debugging and validation
 
