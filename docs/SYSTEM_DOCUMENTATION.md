@@ -662,16 +662,7 @@ The renderer also forwards DOM keydown events through `logKey`. There is no dedu
 
 [`app/preload.js`](../app/preload.js) remains the source of truth for invokers and unsubscribe-returning listeners. Main-to-renderer channels include `timer-tick`, `request-face-snapshot`, `blocked-keybinding`, focus/fullscreen events, `exam-expired`, `exam-state-changed`, and `external-display-detected`.
 
-Controller HTTP posts keep their original bodies:
-
-- `/exam/flag`: session ID, type, details, question ID, timestamp.
-- `/exam/capture`: session ID, type, filename, timestamp, question ID, relative path.
-- `/exam/keylog`: session ID and keylog batch.
-- `/exam/expire`: session ID.
-
-The backend serves five questions without answer keys; `/exam/answer` returns only message and attempted count. Submit/expire evaluates correctness and returns attempted, correct, wrong, total and percentage. See [`backend/README.md`](../backend/README.md) for endpoints and examples.
-
-`saveSessions()` tries temp-file write plus rename, then falls back to direct writing. Read/parse failures return an empty session list. This is best-effort local persistence, not ACID storage or guaranteed crash recovery.
+Keep the distinction between a local IPC action and a persistent HTTP update explicit. Stopping the controller does not submit the backend exam; recording capture metadata does not transfer the image.
 
 ### Renderer-to-main methods
 
@@ -809,7 +800,23 @@ npx eslint src/App.jsx src/hooks src/screens src/services src/utils app/proctori
 
 Controller/frontend tests compare against pre-cleanup commit `4eff01d312be4ee7efdd5817063185f2d07479af`; retain that Git history to run them after committing. Controller checks cover public methods/constants, lifecycle and asynchronous ordering, keyboard combinations, clock/capture scheduling, window guards, evidence paths, process commands and failure policies. They mock native APIs, network and file writes. Frontend checks compare JSX structure, screen priority and start/reset/recovery actions, and parse all extracted files using existing Acorn/JSX packages. Backend tests invoke real route handlers with mocked routing and disposable storage, covering answers, scoring, validation and telemetry. These suites do not verify real React lifecycle behavior, visual rendering or live Electron/HTTP integration.
 
-During this cleanup, build and lint could not complete successfully: installed dependency reads timed out (`os error 60` for Lucide modules; `ETIMEDOUT` while loading ESLint rules). These failures prevent a clean build/lint claim. Ensure local dependency files are readable before rerunning; the cleanup does not reinstall or change packages.
+| Check | What it establishes | What it does not establish |
+|---|---|---|
+| `tests/backend.test.cjs` | Real handler logic with mocked routing and disposable storage: validation, answers, scoring and telemetry | Express startup, live HTTP, packaged process startup or OS behavior |
+| `tests/proctoringController.test.cjs` | Mocked controller comparison: lifecycle/order, keys, timing, paths, display/process/window handling and failures | Actual kiosk enforcement, screen permissions, capture quality or shortcut support |
+| `tests/frontend.test.cjs` | JSX structure, screen priority, syntax and selected start/reset/recovery actions against the original | React lifecycle integration, browser rendering, all quiz behavior or accessibility |
+| `node --check` | Controller JavaScript syntax | Runtime correctness |
+| Vite build / ESLint | Bundling and configured static analysis when dependencies are readable | End-to-end exam/hardware behavior |
+
+The last combined regression run during the readability cleanup passed **52 tests**. Build and lint did not complete successfully in that pass: installed dependency reads timed out (`os error 60` for Lucide modules; `ETIMEDOUT` while loading ESLint rules). This is historical validation evidence, not a clean build/lint or hardware-verification claim. Rerun the commands after addressing storage/dependency availability.
+
+### Inspecting a problem by layer
+
+1. Record the environment (Electron or browser), OS, session ID, reproduction steps and whether the backend was started manually.
+2. For renderer behavior, inspect state and HTTP requests in the browser preview when possible. Packaged/current Electron windows disable renderer DevTools; native debugging needs a controlled development setup, not a production security change.
+3. For native behavior, follow `app/app.js` event/IPC handlers into the controller and inspect its state, window flags, timer handles and session object.
+4. For backend behavior, run it in its own terminal for logs, inspect the response and compare the stored session with local evidence files.
+5. Use timestamps and question IDs to reconstruct ordering. Do not assume UI state, controller state, backend status and successful file writes are synchronized.
 
 ### Where to put breakpoints
 
@@ -826,6 +833,30 @@ During this cleanup, build and lint could not complete successfully: installed d
 
 Existing warnings identify kiosk and image-save failures. Network failures while flagging append a `BACKEND_UNAVAILABLE` event. Other best-effort catches intentionally remain silent; pause on caught exceptions to inspect them rather than adding behavior-changing retry/logging logic.
 
+### Common startup and storage problems
+
+| Symptom | Likely cause / next check |
+|---|---|
+| `ETIMEDOUT: connection timed out, read` in Vite lockfile hashing or package loading | A **local filesystem read** failed; check file availability/cloud-offloading rather than treating the stack as a React syntax error |
+| Vite starts on a different port | Port 5173 is occupied; Electron still requests 5173 |
+| Blank desktop window or missing `dist/index.html` | Vite was unavailable and no frontend build exists; start Vite first or build `dist` |
+| Backend port conflict / unexpected API responses | Another service is on 3000; Electron's probe accepts any resolved HTTP response |
+| Quiz remains on loading | Question request failed or dataset unavailable; inspect `/exam/mcq` and backend logs |
+| Empty blocked-app results despite running apps | Permissions/command failure can return empty lists; inspect process stdout/error |
+| Images exist but capture arrays are empty | Metadata request failed, wrong backend was reused or storage paths differ |
+| Expired UI shows missing/zero score | Session fetch may precede backend grading; compare stored state after finalization |
+| Lost/corrupt session index | Preserve the file, inspect JSON validity and write permissions; there is no guaranteed index recovery |
+
+For cloud-offloaded files on macOS, inspect relevant paths with:
+
+```bash
+ls -lO@ package-lock.json node_modules
+```
+
+Inspect the particular dependency file named in the error as well; the directory's flags alone do not describe every child. A `dataless` flag means file contents are not presently materialized locally. In Finder, use **Download Now** or **Keep Downloaded** where available and wait for completion. A more reliable development location is a non-cloud-synced directory such as `~/Projects/Proctorly`; preserve the full working tree and all uncommitted files when relocating it.
+
+Once manifests/lockfiles are readable, use `npm ci` (and `npm --prefix backend ci` if needed) to reinstall the existing dependency tree. Do not delete `package-lock.json`, change Vite configuration, reset Git or upgrade packages as a workaround for a storage-read failure.
+
 ### Manual checks still required
 
 Use a disposable candidate/session, not a real exam:
@@ -834,9 +865,11 @@ Use a disposable candidate/session, not a real exam:
 2. Start a session; confirm five-question navigation, answer save/update/clear, review flags and unchanged UI.
 3. Confirm desktop PNG/webcam JPEG pairs after 3 seconds and recurring capture, plus matching timestamps/metadata.
 4. Check native shortcut blocking, quit confirmation, focus recovery and the fullscreen lock/unlock overlay.
-5. Connect a second display; confirm the flag/event path and focus reclaim. Disconnect/reconnect the webcam and inspect media-status telemetry.
+5. Connect a second display; confirm the flag/event path and focus reclaim. Disconnect the webcam and inspect `CAMERA_DISCONNECTED`; separately test the available camera-enable retry flow rather than assuming automatic reconnection.
 6. Submit, inspect scoring and kiosk release, then reset and start a fresh session.
 7. Exercise expiry and inspect its backend/local states; test the browser-only preview separately.
+
+Also validate denied screen-recording permission, backend/network interruption, rapid stop/start, confirmed quit and renderer reload using disposable data. Record expected limitations separately from unexpected regressions. A safe demonstration shows setup, a saved/changed answer, a review mark, evidence files, a recoverable lock and final grading; it does not need to expose unrelated desktop content.
 
 ## Preserved limitations
 
@@ -850,5 +883,38 @@ These were not silently fixed in the cleanup:
 - The watchdog reclaims focus/priority but does not itself re-enable kiosk mode.
 - Process-scan failure returns empty lists; native reserved shortcuts may not register.
 - Backend submit/expire permits re-finalization. Local evidence and network telemetry are best-effort, without an outbox or retry guarantee.
+- Local stop occurs before HTTP submission; a failed submit can leave visible quiz state without native monitoring.
+- Renderer/native key ingestion is not deduplicated and uses inconsistent Ctrl input-field names.
+- Camera/readiness labels and fullscreen booleans are not independent proof that all permissions/native operations succeeded.
+- Renderer reload resets an active controller attempt; process-gone handling is not automatic exam recovery.
+- Five-question assumptions are distributed through UI and backend code; changing only the dataset/duration field is insufficient for a general exam configuration.
 
 Any correction to these behaviors needs a separate, agreed feature/bug-fix change.
+
+## Maintenance and further reading
+
+### Where to make a change
+
+| Change area | Start with | Also review |
+|---|---|---|
+| Screen text/layout | `src/screens`, `src/App.css` | Props from `useExamSession`; quiz-specific styles separately |
+| Candidate/session actions | `useExamSession` | Controller lifecycle and backend contracts |
+| Camera/renderer subscriptions | `useCamera`, `useProctoring` | Preload methods, listener cleanup and evidence timing |
+| Native monitoring/policy | `app/proctoringController.js` | `app/app.js` event wiring, timing and mocked regression tests |
+| New IPC operation | `app/preload.js`, `app/app.js` | Sender/payload validation, lifecycle guards and frontend availability |
+| Answer/scoring/storage logic | `backend/server.js`, `Quiz.jsx` | Backend tests, model fields, failure rollback and API examples |
+| Duration/question-count configuration | UI labels/navigation/timer, session start, controller and backend | Defaults, score denominator, expiry and all fixed-five assumptions |
+| Packaging | Root `package.json`, icon assets | Unpacked backend path, writable userData storage and accidental data inclusion |
+
+Keep all controller functionality in its current single file unless a separate architectural change is agreed. Frontend screens/hooks are intentionally separated by responsibility. Do not change policy, ordering, scoring, storage paths or dependencies under the label of a readability-only cleanup.
+
+Before accepting a change, update relevant contract/timing examples, rerun the feasible automated checks, review `git diff` and complete the affected manual checks. If a test fails because a dependency cannot be read, report that environmental blocker separately from application failures.
+
+### Related documents
+
+- [`README.md`](../README.md): project entry point, commands, packaging and repository overview.
+- [`backend/README.md`](../backend/README.md): backend endpoint examples and persistence details.
+- [`docs/prompts/prompts.md`](prompts/prompts.md): historical implementation discussion, with current cleanup corrections. Historical proposals are not evidence that a feature exists.
+- [`docs/UNUSED_CODE_AUDIT.md`](UNUSED_CODE_AUDIT.md) and [`docs/INTERVIEW_TALKING_POINTS.md`](INTERVIEW_TALKING_POINTS.md): local historical reference material with corrections. These files are ignored by Git and may not exist in a fresh clone; neither should be treated as an automatic removal plan or a current feature guarantee.
+
+For implementation questions, follow the function/file maps in this guide and inspect the current code. Proposed improvements—such as authenticated access, server-enforced deadlines, retry storage, reliable recovery, examiner tools and retention controls—require separate design and validation; they are not implemented features of this version.
